@@ -245,16 +245,77 @@ GCF_000007445.1    Bacteria    Proteobacteria    Gammaproteobacteria    Enteroba
 ✅ **extract**（数字酶切）- 支持 Type 1-4 全部输入类型  
 ✅ **build-qual-db**（定性数据库）- 输出所有标签+unique标记  
 ✅ **build-quan-db**（定量数据库）- 只输出unique标签  
-✅ **quantify**（丰度计算）- 计算样品中微生物相对丰度  
+✅ **quantify**（丰度计算）- 计算样品中微生物相对丰度，输出 GCF_detected.xls  
+✅ **find-genome**（筛选基因组）- 根据定性结果筛选定量分析所需的基因组  
+✅ **merge**（结果合并）- 合并多样品丰度表  
 
 **性能提升**：相比 Perl 版本约 1.7-2x 加速  
 **验证状态**：所有功能输出与 Perl 版本完全一致
 
+## 使用示例
+
+### 完整分析流程
+
+```bash
+# 1. 数字酶切
+fast2bRAD-M extract --batch sample_list.tsv -t 2 -s 5 --od enzyme_result
+
+# 2. 定性分析
+fast2bRAD-M quantify -l enzyme_list.tsv -d qual_db -t species -s 5 -o qualitative
+
+# 3. 根据定性结果筛选基因组（新增功能）
+fast2bRAD-M find-genome \
+  -l sample_list.tsv \
+  -d database_dir \
+  -o quantitative_sdb \
+  --qual-dir qualitative \
+  --gscore 5 \
+  --gcf 1
+
+# 4. 构建样品特异性定量数据库
+fast2bRAD-M build-quan-db \
+  -l quantitative_sdb/sample1/sdb.list \
+  -s 5 \
+  -t species \
+  -o quantitative_sdb/sample1/database
+
+# 5. 定量分析
+fast2bRAD-M quantify -l sample_list.tsv -d quantitative_sdb/sample1/database -t species -s 5 -o quantitative
+
+# 6. 结果合并
+fast2bRAD-M merge -l abundance_list.tsv -o quantitative -p Abundance_Stat
+```
+
+### find-genome - 根据定性结果筛选基因组
+
+根据定性分析结果，筛选出用于定量分析的候选基因组：
+
+```bash
+fast2bRAD-M find-genome \
+  -l sample_list.tsv \
+  -d database_dir \
+  -o output_dir \
+  --qual-dir qualitative_dir \
+  --gscore 5 \
+  --gcf 1
+```
+
+**参数说明**：
+- `-l, --list`: 样品列表文件（TSV格式）
+- `-d, --database`: 数据库目录（需包含 `abfh_classify_with_speciename.txt.gz`）
+- `-o, --output`: 输出目录
+- `--qual-dir`: 定性分析结果目录
+- `--gscore`: G-score 阈值（默认 5，表示 >5）
+- `--gcf`: GCF 标签数阈值（默认 1，表示 >1）
+
+**输出**：
+- `$output_dir/$sample/sdb.list` - 每个样品的候选基因组列表
+
 ## 待实现
 
-- [ ] merge（结果合并）- 合并多样品丰度表
 - [ ] 内置 PEAR 拼接逻辑（当前 Type 4 需要外部预处理）
-- [ ] 并行处理多样本
+- [ ] 多酶自动合并功能（当前需要手动合并）
+- [ ] 一体化主流程脚本（pipeline 子命令）
 
 ## 许可证
 

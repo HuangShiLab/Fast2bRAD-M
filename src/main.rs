@@ -2,6 +2,7 @@ mod build_qual_db;
 mod build_quan_db;
 mod enzymes;
 mod extract;
+mod find_genome;
 mod io_utils;
 mod merge;
 mod quantify;
@@ -34,6 +35,9 @@ enum Commands {
 
     /// 合并多样品丰度表
     Merge(merge::MergeArgs),
+
+    /// 根据定性结果筛选定量基因组
+    FindGenome(find_genome::FindGenomeArgs),
 }
 
 fn main() -> Result<()> {
@@ -44,5 +48,6 @@ fn main() -> Result<()> {
         Commands::BuildQuanDb(args) => build_quan_db::run(args),
         Commands::Quantify(args) => quantify::run(args),
         Commands::Merge(args) => merge::run(args),
+        Commands::FindGenome(args) => find_genome::run(args),
     }
 }

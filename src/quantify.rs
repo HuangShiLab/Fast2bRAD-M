@@ -332,7 +332,8 @@ fn process_sample(
 ) -> Result<()> {
     // 统计标签深度
     let mut tag_num: FxHashMap<String, FxHashMap<Vec<u8>, usize>> = FxHashMap::default();
-    let mut detected_gcf_tag: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
+    // 记录每个分类下每个GCF检测到的标签集合 (taxonomy -> GCF -> HashSet<tag>)
+    let mut detected_gcf_tag: FxHashMap<String, FxHashMap<String, FxHashSet<Vec<u8>>>> = FxHashMap::default();
 
     let mut reader = parse_fastx_file(sample_data)?;
 
@@ -354,8 +355,10 @@ fn process_sample(
                     for gcf_id in gcf_list {
                         detected_gcf_tag
                             .entry(taxonomy.clone())
+                            .or_insert_with(FxHashMap::default)
+                            .entry(gcf_id.clone())
                             .or_insert_with(FxHashSet::default)
-                            .insert(gcf_id.clone());
+                            .insert(tag_seq.clone());
                     }
                 }
             }
@@ -374,8 +377,10 @@ fn process_sample(
                         for gcf_id in gcf_list {
                             detected_gcf_tag
                                 .entry(taxonomy.clone())
+                                .or_insert_with(FxHashMap::default)
+                                .entry(gcf_id.clone())
                                 .or_insert_with(FxHashSet::default)
-                                .insert(gcf_id.clone());
+                                .insert(rc_tag.clone());
                         }
                     }
                 }
@@ -395,6 +400,48 @@ fn process_sample(
     // 创建样品输出目录
     let sample_dir = output_dir.join(sample_name);
     std::fs::create_dir_all(&sample_dir)?;
+
+    // 输出 GCF_detected.xls 文件
+    let gcf_detected_file = sample_dir.join(format!("{}.{}.GCF_detected.xls", sample_name, enzyme.name));
+    let mut gcf_writer = BufWriter::new(File::create(&gcf_detected_file)?);
+    
+    // 按分类和GCF排序输出
+    let mut taxonomy_list: Vec<&String> = detected_gcf_tag.keys().collect();
+    taxonomy_list.sort();
+    
+    for taxonomy in taxonomy_list {
+        let gcf_map = &detected_gcf_tag[taxonomy];
+        let mut gcf_list: Vec<&String> = gcf_map.keys().collect();
+        gcf_list.sort();
+        
+        for gcf_id in gcf_list {
+            let detected_tags = &gcf_map[gcf_id];
+            let detected_tag_num = detected_tags.len();
+            
+            // 获取理论标签数
+            let gcf_all_theory_num = if let Some(gcf_tags) = tag_theory_num.get(taxonomy) {
+                if let Some(tags) = gcf_tags.get(gcf_id) {
+                    tags.len()
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            
+            let percent = if gcf_all_theory_num > 0 {
+                detected_tag_num as f64 / gcf_all_theory_num as f64
+            } else {
+                0.0
+            };
+            
+            writeln!(
+                gcf_writer,
+                "{}\t{}\t{}\t{}\t{:.4}",
+                taxonomy, gcf_id, gcf_all_theory_num, detected_tag_num, percent
+            )?;
+        }
+    }
 
     // 输出结果
     let output_file = sample_dir.join(format!("{}.{}.xls", sample_name, enzyme.name));

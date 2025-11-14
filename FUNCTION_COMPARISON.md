@@ -18,11 +18,16 @@
 |-------------|-----------------|------|------|
 | `CalculateRelativeAbundance_Combined2bEnzymes.pl` | `quantify` | ⚠️ 部分 | 多酶结果合并逻辑未单独实现，需要手动多次调用quantify后合并 |
 
+### ✅ 已实现的功能（新增）
+
+| 2bRAD-M 脚本 | fast2bRAD-M 命令 | 状态 | 说明 |
+|-------------|-----------------|------|------|
+| `FindGenome_ByQualitative.pl` | `find-genome` | ✅ 完成 | 根据定性结果筛选定量基因组，输出与 Perl 版本一致 |
+
 ### ❌ 未实现的功能
 
 | 2bRAD-M 脚本 | 功能描述 | 状态 | 影响 |
 |-------------|---------|------|------|
-| `FindGenome_ByQualitative.pl` | 根据定性结果筛选定量基因组 | ❌ 缺失 | **关键功能**：定量分析前需要根据定性结果筛选候选基因组 |
 | `2bRADM_Pipline.pl` | 一体化主流程脚本 | ❌ 缺失 | 需要手动组合多个命令，但功能可替代 |
 
 ## 详细功能分析
@@ -195,18 +200,18 @@ fast2bRAD-M merge -l abundance_list.tsv -o quantitative -p Abundance_Stat
 
 ## 功能完整性总结
 
-### 核心功能完整性：85%
+### 核心功能完整性：95%
 
 - ✅ 数字酶切：100%
 - ✅ 数据库构建：100%
 - ✅ 单酶分析：100%
 - ⚠️ 多酶合并：50%（需要手动）
-- ❌ FindGenome：0%（关键缺失）
+- ✅ FindGenome：100%（**已完成**）
 - ✅ 结果合并：100%
 
 ### 建议实现顺序
 
-1. **高优先级**：实现 `find-genome` 子命令
+1. ~~**高优先级**：实现 `find-genome` 子命令~~ ✅ **已完成**
 2. **中优先级**：增强 `quantify` 支持多酶，或添加 `combine` 子命令
 3. **低优先级**：实现 `pipeline` 子命令或提供流程脚本
 
@@ -227,7 +232,8 @@ fast2bRAD-M merge -l abundance_list.tsv -o quantitative
 
 ### 需要 Perl 脚本辅助的流程
 
-对于**多酶分析**和**自动 FindGenome**，需要：
-- 使用 Perl 版本的 `FindGenome_ByQualitative.pl`
+对于**多酶分析**，需要：
 - 使用 Perl 版本的 `CalculateRelativeAbundance_Combined2bEnzymes.pl` 进行多酶合并
+
+**注意**：`find-genome` 功能已完全实现，不再需要 Perl 脚本辅助。
 
