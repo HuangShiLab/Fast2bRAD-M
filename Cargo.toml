@@ -1,0 +1,12 @@
+[package]
+name = "fast2bRAD-M"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+flate2 = "1.1.5"
+fxhash = "0.2.1"
+needletail = "0.6"
+rayon = "1.10"
