@@ -5,6 +5,7 @@ mod extract;
 mod find_genome;
 mod io_utils;
 mod merge;
+mod pipeline;
 mod quantify;
 mod types;
 
@@ -38,6 +39,9 @@ enum Commands {
 
     /// 根据定性结果筛选定量基因组
     FindGenome(find_genome::FindGenomeArgs),
+
+    /// 一键流水线：extract → build-db → quantify → merge
+    Pipeline(pipeline::PipelineArgs),
 }
 
 fn main() -> Result<()> {
@@ -49,5 +53,6 @@ fn main() -> Result<()> {
         Commands::Quantify(args) => quantify::run(args),
         Commands::Merge(args) => merge::run(args),
         Commands::FindGenome(args) => find_genome::run(args),
+        Commands::Pipeline(args) => pipeline::run(args),
     }
 }

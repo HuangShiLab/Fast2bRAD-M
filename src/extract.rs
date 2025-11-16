@@ -1,8 +1,9 @@
 use std::fs::File;
-use std::io::Write;
+use std::io::{Write, Read, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
@@ -68,6 +69,14 @@ pub struct ExtractArgs {
     /// 输出格式：fa 或 fq
     #[arg(long = "fm", default_value = "fa")]
     pub format: String,
+
+    /// PEAR 可执行文件路径（Type 2 双端时可用）
+    #[arg(long = "pe", default_value = "pear")]
+    pub pear_bin: String,
+
+    /// PEAR 线程数（Type 2 双端时可用）
+    #[arg(long = "pc", default_value = "1")]
+    pub pear_cpu: usize,
 }
 
 pub fn run(args: ExtractArgs) -> Result<()> {
@@ -212,6 +221,8 @@ fn run_batch_mode(base_args: ExtractArgs, batch_file: &Path) -> Result<()> {
             min_quality_percent: base_args.min_quality_percent,
             quality_base: base_args.quality_base,
             format: base_args.format.clone(),
+            pear_bin: base_args.pear_bin.clone(),
+            pear_cpu: base_args.pear_cpu,
         };
         
         if let Some(input2_path) = input2 {
@@ -388,7 +399,13 @@ fn extract_shotgun(
     compress: bool,
     qc: &QualityControl,
 ) -> Result<()> {
-    let input_path = &args.input[0];
+    // 若为双端输入（2个文件），优先使用 PEAR 合并，再以合并产物作为输入
+    let mut merged_path: Option<PathBuf> = None;
+    if args.input.len() == 2 {
+        merged_path = Some(run_pear_and_combine(args, enzyme)?);
+    }
+
+    let input_path = merged_path.as_ref().unwrap_or(&args.input[0]);
     let output_prefix = &args.output_prefix[0];
 
     println!("提取 shotgun 数据标签：{}", input_path.display());
@@ -477,6 +494,60 @@ fn extract_shotgun(
     );
 
     Ok(())
+}
+
+/// 调用 PEAR 合并 R1/R2，并将 assembled + unassembled.forward + unassembled.reverse 合并为 gzip fastq
+fn run_pear_and_combine(args: &ExtractArgs, enzyme: &Enzyme) -> Result<PathBuf> {
+    let r1 = &args.input[0];
+    let r2 = &args.input[1];
+    let prefix = &args.output_prefix[0];
+
+    // 输出前缀：<outdir>/<prefix>.<enzyme>
+    let base = args.output_dir.join(format!("{}.{}", prefix, enzyme.name));
+
+    // 1) 运行 PEAR
+    let status = Command::new(&args.pear_bin)
+        .args([
+            "-f",
+            r1.to_str().unwrap(),
+            "-r",
+            r2.to_str().unwrap(),
+            "-e",
+            "-o",
+            base.to_str().unwrap(),
+            "-j",
+            &args.pear_cpu.to_string(),
+        ])
+        .status()
+        .with_context(|| format!("无法执行 PEAR：{}", args.pear_bin))?;
+    if !status.success() {
+        bail!("PEAR 执行失败，退出码：{}", status.code().unwrap_or(-1));
+    }
+
+    // 2) 合并三个输出为 .pear.fastq.gz
+    let assembled = args.output_dir.join(format!("{}.{}.assembled.fastq", prefix, enzyme.name));
+    let unassembled_f = args.output_dir.join(format!("{}.{}.unassembled.forward.fastq", prefix, enzyme.name));
+    let unassembled_r = args.output_dir.join(format!("{}.{}.unassembled.reverse.fastq", prefix, enzyme.name));
+
+    // 改为生成未压缩的合并 FASTQ，避免 gzip 写入异常
+    let pear_fastq = args.output_dir.join(format!("{}.{}.pear.fastq", prefix, enzyme.name));
+    {
+        let mut out = File::create(&pear_fastq)?;
+        for p in [&assembled, &unassembled_f, &unassembled_r] {
+            if p.exists() {
+                let mut f = File::open(p)?;
+                std::io::copy(&mut f, &mut out)?;
+            }
+        }
+    }
+
+    // 3) 清理中间文件
+    let _ = std::fs::remove_file(assembled);
+    let _ = std::fs::remove_file(unassembled_f);
+    let _ = std::fs::remove_file(unassembled_r);
+    let _ = std::fs::remove_file(base.with_extension("discarded.fastq"));
+
+    Ok(pear_fastq)
 }
 
 // ========== Type 3: 单标签 ==========

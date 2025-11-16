@@ -22,7 +22,7 @@ pub struct FindGenomeArgs {
     pub output_dir: PathBuf,
 
     /// 定性结果目录
-    #[arg(long = "qual-dir")]
+    #[arg(long = "qual-dir", alias = "qualdir")]
     pub qual_dir: PathBuf,
 
     /// G-score 阈值（默认 5，表示 >5）

@@ -21,6 +21,52 @@ cargo build --release
 
 ## 使用
 
+### pipeline - 一键主流程（对齐 Perl 管线）
+
+将 Perl 的 `2bRADM_Pipline.pl` 流程一键化，串联：
+extract → （可选）build-qual-db → （可选）build-quan-db → quantify → merge  
+产物目录结构：`01_extract/ 02_db_qual/ 03_db_quan/ 04_quantify/ 05_merge/`
+
+```bash
+# 使用已有数据库（推荐：与 Perl 一致的 classify 与 *.fa.gz）
+fast2bRAD-M pipeline \
+  --samples /abs/samples.tsv \
+  --site BcgI \
+  --level species \
+  --outdir /abs/runs/run1 \
+  --prefix run1 \
+  --database /abs/db_ready \
+  --gscore 5 \
+  --resume yes
+
+# 全流程（含数据库构建）：提供 genome-list 和（可选）pre-digested-dir
+fast2bRAD-M pipeline \
+  --mode full \
+  --samples /abs/samples.tsv \
+  --genome-list /abs/genomes.tsv \
+  --pre-digested-dir /abs/predig \
+  --site BcgI \
+  --level species \
+  --outdir /abs/runs/run_full \
+  --prefix run_full \
+  --gscore 5 \
+  --resume yes
+```
+
+参数与默认（对齐 Perl 取舍）：
+- `--mode`：full|db-only|sample-only（默认 full）
+- `--gscore`：默认 5（与 Perl 常用阈值一致）
+- `--resume`：默认 yes（存在产物则跳过）
+- `--threads`：设置 `RAYON_NUM_THREADS`；不设则自动
+- `--mock`、`--control`：合并阶段过滤（与 Perl 行为一致）
+- `--samples`：TSV：`sample<TAB>path1[<TAB>path2]`（原始 FASTQ/FASTA 路径，非 .iibsp）
+- 数据库目录需包含：`BcgI.species.fa.gz` 和 `abfh_classify_with_speciename.txt.gz`
+
+Bash 包装脚本（与上完全等价）：
+```bash
+bash fast2bRAD-M/scripts/run_pipeline.sh --help
+```
+
 ### extract - 数字酶切
 
 从序列数据中提取 2bRAD 标签：
@@ -48,6 +94,15 @@ fast2bRAD-M extract \
   -n 0.08 \
   -q 30 \
   -p 80
+
+# Type 2: Shotgun 双端（PEAR 拼接，Perl 对齐）
+# 需先安装 PEAR（conda install -c bioconda pear），并可通过 --pe 指定可执行名/路径，--pc 指定线程
+fast2bRAD-M extract \
+  -i R1.fq.gz R2.fq.gz \
+  -t 2 -s BcgI \
+  --od output_dir --op sample_name \
+  --pe pear --pc 8 \
+  -q 15 --gz yes
 
 # Type 3: 单 2bRAD 标签
 fast2bRAD-M extract \
@@ -315,7 +370,27 @@ fast2bRAD-M find-genome \
 
 - [ ] 内置 PEAR 拼接逻辑（当前 Type 4 需要外部预处理）
 - [ ] 多酶自动合并功能（当前需要手动合并）
-- [ ] 一体化主流程脚本（pipeline 子命令）
+- [x] 一体化主流程脚本（pipeline 子命令）
+
+## pipeline：双端与 PEAR 透传
+
+流水线使用已有数据库时的一键示例（双端+PEAR）：
+
+```bash
+fast2bRAD-M pipeline \
+  --mode sample-only \
+  -l /abs/samples.tsv \
+  -s BcgI -t species \
+  --outdir /abs/runs/run_pe \
+  --prefix run_pe \
+  -d /abs/db_ready \
+  --pe pear --pc 8 \
+  --resume yes
+```
+
+说明：
+- 若样品行提供两列路径（R1、R2），pipeline 会透传 `--pe/--pc` 到 extract，先调用 PEAR 拼接，再继续提取。
+- 生成的中间合并文件为 `<prefix>.<enzyme>.pear.fastq`，最终样品标签文件为 `<prefix>.<enzyme>.iibsp[.gz]`。
 
 ## 许可证
 

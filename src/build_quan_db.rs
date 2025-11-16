@@ -39,7 +39,7 @@ pub struct BuildQuanDbArgs {
     pub pre_digested_dir: Option<PathBuf>,
 
     /// 是否删除基因组内冗余标签
-    #[arg(short = 'r', long = "remove-redundant", default_value = "yes")]
+    #[arg(short = 'r', long = "remove-redundant", default_value = "no")]
     pub remove_redundant: String,
 }
 
