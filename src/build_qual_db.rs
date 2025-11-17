@@ -12,7 +12,6 @@ use needletail::parse_fastx_file;
 
 use crate::enzymes::{Enzyme, enzyme_by_id, enzyme_by_name};
 use crate::io_utils;
-use crate::types::DB_FILE_EXT;
 
 #[derive(Args, Debug)]
 pub struct BuildQualDbArgs {
@@ -663,7 +662,7 @@ fn output_database(
     remove_redundant: bool,
     output_dir: &Path,
 ) -> Result<()> {
-    let output_path = output_dir.join(format!("{}.{}.{}", enzyme.name, level.name(), DB_FILE_EXT));
+    let output_path = output_dir.join(format!("{}.{}.fa.gz", enzyme.name, level.name()));
     let file = File::create(&output_path)?;
     let mut writer = GzEncoder::new(file, Compression::default());
 

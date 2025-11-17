@@ -14,9 +14,32 @@
 
 ## 安装
 
+### 方式一：使用 Conda 环境（推荐）
+
+使用提供的 conda 环境配置文件快速搭建环境：
+
+```bash
+conda env create -f fast2bRAD-M/fast2brad_m_conda.yaml -n fast2brad
+conda activate fast2brad
+cd fast2bRAD-M
+cargo build --release
+```
+
+环境包含：
+- Rust 编译工具链
+- PEAR（用于双端数据拼接）
+- zlib、openssl（依赖库）
+
+### 方式二：直接编译
+
 ```bash
 cd fast2bRAD-M
 cargo build --release
+```
+
+**注意**：如果使用 Type 2 双端数据或 Type 4 功能，需要单独安装 PEAR：
+```bash
+conda install -c bioconda pear
 ```
 
 ## 使用

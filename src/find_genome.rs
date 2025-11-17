@@ -149,20 +149,54 @@ fn process_sample(
     g_score_threshold: i32,
     gcf_threshold: i32,
 ) -> Result<()> {
-    // 读取 combine.xls 文件
+    // 读取 combine.xls 文件，如果不存在则尝试使用单个酶的结果文件
     let combine_file = qual_dir.join(sample_name).join(format!("{}.combine.xls", sample_name));
     
-    if !combine_file.exists() {
-        eprintln!(
-            "!!! {} 没有定性结果文件: {}，跳过定量分析",
-            sample_name,
-            combine_file.display()
-        );
-        return Ok(());
-    }
-
-    // 解析 combine.xls，提取使用的酶和通过 G-score 阈值的分类
-    let (enzymes, pass_gscore_classes) = parse_combine_file(&combine_file, g_score_threshold)?;
+    let (enzymes, pass_gscore_classes) = if combine_file.exists() {
+        // 使用 combine.xls
+        parse_combine_file(&combine_file, g_score_threshold)?
+    } else {
+        // 回退：扫描单个酶的结果文件
+        let sample_dir = qual_dir.join(sample_name);
+        let mut found_enzymes = Vec::new();
+        let mut found_classes = FxHashSet::default();
+        
+        // 扫描所有 {sample}.{enzyme}.xls 文件
+        if let Ok(entries) = std::fs::read_dir(&sample_dir) {
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    // 匹配格式: {sample}.{enzyme}.xls，排除 GCF_detected.xls
+                    if file_name.ends_with(".xls") 
+                        && !file_name.contains("GCF_detected") 
+                        && file_name.starts_with(&format!("{}.", sample_name)) {
+                        // 提取酶名：{sample}.{enzyme}.xls -> {enzyme}
+                        let enzyme_part = file_name
+                            .strip_prefix(&format!("{}.", sample_name))
+                            .and_then(|s| s.strip_suffix(".xls"));
+                        
+                        if let Some(enzyme) = enzyme_part {
+                            found_enzymes.push(enzyme.to_string());
+                            // 解析该文件，提取通过 G-score 阈值的分类
+                            let (_, classes) = parse_single_enzyme_file(&path, g_score_threshold)?;
+                            found_classes.extend(classes);
+                        }
+                    }
+                }
+            }
+        }
+        
+        if found_enzymes.is_empty() {
+            eprintln!(
+                "!!! {} 没有定性结果文件（combine.xls 或单个酶结果文件），跳过定量分析",
+                sample_name
+            );
+            return Ok(());
+        }
+        
+        (found_enzymes, found_classes)
+    };
     
     if enzymes.is_empty() {
         eprintln!("警告: {} 未找到使用的酶", sample_name);
@@ -296,6 +330,55 @@ fn parse_combine_file(
     enzymes.dedup();
 
     Ok((enzymes, pass_gscore_classes))
+}
+
+/// 解析单个酶的结果文件（格式与 combine.xls 类似，但没有酶信息行）
+fn parse_single_enzyme_file(
+    enzyme_file: &Path,
+    g_score_threshold: i32,
+) -> Result<(Vec<String>, FxHashSet<String>)> {
+    let file = File::open(enzyme_file)
+        .with_context(|| format!("无法打开酶结果文件: {}", enzyme_file.display()))?;
+    let reader = BufReader::new(file);
+
+    let mut pass_gscore_classes = FxHashSet::default();
+
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.trim();
+
+        if line.is_empty() {
+            continue;
+        }
+
+        // 跳过表头行
+        if line.to_uppercase().starts_with("#KINGDOM") {
+            continue;
+        }
+
+        // 跳过注释行
+        if line.starts_with('#') {
+            continue;
+        }
+
+        // 解析数据行
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 9 {
+            continue;
+        }
+
+        // 最后一列是 G_Score
+        if let Ok(g_score) = parts[parts.len() - 1].parse::<f64>() {
+            if g_score > g_score_threshold as f64 {
+                // 获取分类信息（前 N-8 列）
+                let class = parts[0..parts.len() - 8].join("\t");
+                pass_gscore_classes.insert(class);
+            }
+        }
+    }
+
+    // 单个酶文件不包含酶列表信息，返回空
+    Ok((Vec::new(), pass_gscore_classes))
 }
 
 /// 解析 GCF_detected.xls 文件，返回符合条件的 GCF 列表

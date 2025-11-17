@@ -8,6 +8,7 @@ use std::process::Command;
 use crate::build_qual_db;
 use crate::build_quan_db;
 use crate::extract;
+use crate::find_genome;
 use crate::merge;
 use crate::quantify;
 
@@ -92,6 +93,10 @@ pub struct PipelineArgs {
     /// Quantify 的 G-score 阈值
     #[arg(long = "gscore", short = 'g', default_value = "5")]
     pub g_score: f64,
+
+    /// Find-genome 的 GCF 标签数阈值（用于 sample-only 模式）
+    #[arg(long = "gcf", default_value = "1")]
+    pub gcf_threshold: i32,
 }
 
 pub fn run(args: PipelineArgs) -> Result<()> {
@@ -106,10 +111,17 @@ pub fn run(args: PipelineArgs) -> Result<()> {
     let d03 = args.outdir.join("03_db_quan");
     let d04 = args.outdir.join("04_quantify");
     let d05 = args.outdir.join("05_merge");
+    let d_qual = args.outdir.join("qualitative");  // 定性分析结果目录
+    let d_sdb = args.outdir.join("quantitative_sdb");  // 样品特异性定量数据库目录
     if args.mode != "db-only" {
         std::fs::create_dir_all(&d01)?;
         std::fs::create_dir_all(&d04)?;
         std::fs::create_dir_all(&d05)?;
+    }
+    if args.mode == "sample-only" {
+        // sample-only 模式需要定性分析目录
+        std::fs::create_dir_all(&d_qual)?;
+        std::fs::create_dir_all(&d_sdb)?;
     }
     if args.mode != "sample-only" {
         // 数据库目录按需创建
@@ -121,7 +133,8 @@ pub fn run(args: PipelineArgs) -> Result<()> {
 
     // Step 1: extract（batch, type=2）
     if args.mode != "db-only" {
-        println!("\n===== [1/4] 提取样品标签 (extract) =====");
+        let step1_num = if args.mode == "sample-only" { "1/5" } else { "1/4" };
+        println!("\n===== [{}] 提取样品标签 (extract) =====", step1_num);
         let extract_done_marker = d01.join(".done");
         if !resume || !extract_done_marker.exists() {
             let ext_args = extract::ExtractArgs {
@@ -173,16 +186,22 @@ pub fn run(args: PipelineArgs) -> Result<()> {
                 println!("resume=on: 跳过 build-qual-db（已存在）");
             }
 
-            // build-quan-db
+            // build-quan-db（使用 02_db_qual 中已生成的 enzyme.fa.gz，避免重复生成）
             let quan_done_marker = d03.join(".done");
             if !resume || !quan_done_marker.exists() {
+                // 使用 02_db_qual 中已生成的 enzyme.fa.gz
+                let qual_enzyme_file = d02.join(format!("{}.enzyme.fa.gz", get_enzyme_name(&args.site)?));
+                if !qual_enzyme_file.exists() {
+                    bail!("定性数据库酶切文件不存在: {}，请先完成 build-qual-db", qual_enzyme_file.display());
+                }
+                
                 let quan_args = build_quan_db::BuildQuanDbArgs {
                     genome_list: gl.clone(),
                     enzyme_site: args.site.clone(),
                     taxonomy_levels: args.level.clone(),
                     output_dir: d03.clone(),
-                    enzyme_file: None,
-                    pre_digested_dir: args.pre_digested_dir.clone(),
+                    enzyme_file: Some(qual_enzyme_file),
+                    pre_digested_dir: None,  // 不再使用 pre_digested_dir，直接使用 02_db_qual 的文件
                     remove_redundant: "yes".to_string(),
                 };
                 build_quan_db::run(quan_args).context("build-quan-db 阶段失败")?;
@@ -199,11 +218,116 @@ pub fn run(args: PipelineArgs) -> Result<()> {
             bail!("未提供 --genome-list 或 --database，无法进行 quantify");
         }
     } else {
-        // sample-only 模式必须提供 database
-        args.database_dir
+        // sample-only 模式必须提供 database（应该是 02_db_qual 定性数据库）
+        let qual_db = args.database_dir
             .as_ref()
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("sample-only 模式必须提供 --database"))?
+            .ok_or_else(|| anyhow::anyhow!("sample-only 模式必须提供 --database（应为 02_db_qual 定性数据库）"))?;
+        
+        // 在定性分析之前，检查并自动生成分类文件（若缺失且 genome-list 为 GTDB）
+        let classify_path = qual_db.join("abfh_classify_with_speciename.txt.gz");
+        if !classify_path.exists() {
+            if let Some(gl) = args.genome_list.as_ref() {
+                if is_gtdb_list(gl).unwrap_or(false) {
+                    println!("分类文件缺失，检测到 GTDB 清单，尝试自动生成 ...");
+                    ensure_convert_tool_and_run(gl, &qual_db)
+                        .context("自动生成分类文件失败")?;
+                }
+            }
+        }
+        
+        // Step 2a: 定性分析（使用 02_db_qual）
+        println!("\n===== [2a/5] 定性分析 (qualitative) =====");
+        let qual_done_marker = d_qual.join(".done");
+        if !resume || !qual_done_marker.exists() {
+            let sample_list_for_qual = d_qual.join(format!("{}.samples.tsv", args.prefix));
+            build_sample_list_for_quantify(&args.samples, &d01, &args.site, &sample_list_for_qual)?;
+
+            let q_args = quantify::QuantifyArgs {
+                sample_list: sample_list_for_qual,
+                database_dir: qual_db.clone(),
+                taxonomy_level: args.level.clone(),
+                enzyme_site: args.site.clone(),
+                output_dir: d_qual.clone(),
+                g_score_threshold: 0.0,  // 定性分析不对 G-score 过滤
+                verbose: "yes".to_string(),
+            };
+            quantify::run(q_args).context("定性分析阶段失败")?;
+            std::fs::write(&qual_done_marker, b"ok")?;
+        } else {
+            println!("resume=on: 跳过定性分析（已存在）");
+        }
+
+        // Step 2b: find-genome（根据定性结果筛选基因组）
+        println!("\n===== [2b/5] 筛选基因组 (find-genome) =====");
+        let find_genome_done_marker = d_sdb.join(".done");
+        if !resume || !find_genome_done_marker.exists() {
+            let fg_args = find_genome::FindGenomeArgs {
+                sample_list: args.samples.clone(),
+                database_dir: qual_db.clone(),
+                output_dir: d_sdb.clone(),
+                qual_dir: d_qual.clone(),
+                g_score_threshold: args.g_score as i32,
+                gcf_threshold: args.gcf_threshold,
+            };
+            find_genome::run(fg_args).context("find-genome 阶段失败")?;
+            std::fs::write(&find_genome_done_marker, b"ok")?;
+        } else {
+            println!("resume=on: 跳过 find-genome（已存在）");
+        }
+
+        // Step 2c: 为每个样品构建特异性定量数据库
+        println!("\n===== [2c/5] 构建样品特异性定量数据库 =====");
+        let samples = read_sample_names(&args.samples)?;
+        let enzyme_file = qual_db.join(format!("{}.{}.fa.gz", get_enzyme_name(&args.site)?, args.level));
+        if !enzyme_file.exists() {
+            bail!("定性数据库酶切文件不存在: {}", enzyme_file.display());
+        }
+
+        for sample_name in &samples {
+            let sample_sdb_list = d_sdb.join(sample_name).join("sdb.list");
+            if !sample_sdb_list.exists() {
+                eprintln!("警告: 样品 {} 没有 sdb.list，跳过构建定量数据库", sample_name);
+                continue;
+            }
+
+            let sample_db_dir = d_sdb.join(sample_name).join("database");
+            let sample_db_done = sample_db_dir.join(".done");
+            if resume && sample_db_done.exists() {
+                println!("resume=on: 跳过样品 {} 的定量数据库构建（已存在）", sample_name);
+                continue;
+            }
+
+            std::fs::create_dir_all(&sample_db_dir)?;
+            
+            // 复制 sdb.list 为分类文件
+            let classify_file = sample_db_dir.join("abfh_classify_with_speciename.txt.gz");
+            if !classify_file.exists() {
+                std::fs::copy(&sample_sdb_list, sample_db_dir.join("abfh_classify_with_speciename.txt"))?;
+                Command::new("gzip")
+                    .arg("-f")
+                    .arg(sample_db_dir.join("abfh_classify_with_speciename.txt"))
+                    .status()
+                    .context("压缩分类文件失败")?;
+            }
+
+            // 构建定量数据库
+            let quan_args = build_quan_db::BuildQuanDbArgs {
+                genome_list: sample_sdb_list,
+                enzyme_site: args.site.clone(),
+                taxonomy_levels: args.level.clone(),
+                output_dir: sample_db_dir.clone(),
+                enzyme_file: Some(enzyme_file.clone()),
+                pre_digested_dir: None,
+                remove_redundant: "yes".to_string(),  // 与 full 模式保持一致，去除基因组内冗余标签
+            };
+            build_quan_db::run(quan_args)
+                .with_context(|| format!("构建样品 {} 的定量数据库失败", sample_name))?;
+            std::fs::write(&sample_db_done, b"ok")?;
+        }
+
+        // 返回第一个样品的数据库目录（用于后续步骤，实际会为每个样品单独处理）
+        qual_db
     };
 
     // 自动生成分类文件（若缺失且 genome-list 为 GTDB）
@@ -220,35 +344,85 @@ pub fn run(args: PipelineArgs) -> Result<()> {
 
     // Step 3: quantify（基于 Step1 产物自动生成样品列表）
     if args.mode != "db-only" {
-        println!("\n===== [3/4] 丰度分析 (quantify) =====");
-        let quant_done_marker = d04.join(".done");
-        if !resume || !quant_done_marker.exists() {
-            let sample_list_for_quant = d04.join(format!("{}.samples.tsv", args.prefix));
-            build_sample_list_for_quantify(&args.samples, &d01, &args.site, &sample_list_for_quant)?;
+        if args.mode == "sample-only" {
+            // sample-only 模式：为每个样品使用其特异性定量数据库
+            println!("\n===== [3/5] 定量分析 (quantify) =====");
+            let samples = read_sample_names(&args.samples)?;
+            for sample_name in &samples {
+                let sample_db_dir = d_sdb.join(sample_name).join("database");
+                if !sample_db_dir.exists() {
+                    eprintln!("警告: 样品 {} 没有定量数据库，跳过定量分析", sample_name);
+                    continue;
+                }
 
-            let q_args = quantify::QuantifyArgs {
-                sample_list: sample_list_for_quant,
-                database_dir: db_dir_in_use.clone(),
-                taxonomy_level: args.level.clone(),
-                enzyme_site: args.site.clone(),
-                output_dir: d04.clone(),
-                g_score_threshold: args.g_score,
-                verbose: "yes".to_string(),
-            };
-            quantify::run(q_args).context("quantify 阶段失败")?;
-            std::fs::write(&quant_done_marker, b"ok")?;
+                let sample_quant_dir = d04.join(sample_name);
+                std::fs::create_dir_all(&sample_quant_dir)?;
+                let sample_quant_done = sample_quant_dir.join(".done");
+                if resume && sample_quant_done.exists() {
+                    println!("resume=on: 跳过样品 {} 的定量分析（已存在）", sample_name);
+                    continue;
+                }
+
+                // 为单个样品生成列表
+                let sample_list_file = sample_quant_dir.join(format!("{}.list.tsv", sample_name));
+                let sample_iibsp = d01.join(format!("{}.{}.iibsp.gz", sample_name, get_enzyme_name(&args.site)?));
+                if !sample_iibsp.exists() {
+                    eprintln!("警告: 样品 {} 的提取产物不存在，跳过", sample_name);
+                    continue;
+                }
+                std::fs::write(&sample_list_file, format!("{}\t{}", sample_name, sample_iibsp.display()))?;
+
+                let q_args = quantify::QuantifyArgs {
+                    sample_list: sample_list_file,
+                    database_dir: sample_db_dir,
+                    taxonomy_level: args.level.clone(),
+                    enzyme_site: args.site.clone(),
+                    output_dir: sample_quant_dir.clone(),
+                    g_score_threshold: args.g_score,
+                    verbose: "yes".to_string(),
+                };
+                quantify::run(q_args)
+                    .with_context(|| format!("样品 {} 的定量分析失败", sample_name))?;
+                std::fs::write(&sample_quant_done, b"ok")?;
+            }
         } else {
-            println!("resume=on: 跳过 quantify（已存在）");
+            // full 模式：使用全局数据库
+            println!("\n===== [3/4] 丰度分析 (quantify) =====");
+            let quant_done_marker = d04.join(".done");
+            if !resume || !quant_done_marker.exists() {
+                let sample_list_for_quant = d04.join(format!("{}.samples.tsv", args.prefix));
+                build_sample_list_for_quantify(&args.samples, &d01, &args.site, &sample_list_for_quant)?;
+
+                let q_args = quantify::QuantifyArgs {
+                    sample_list: sample_list_for_quant,
+                    database_dir: db_dir_in_use.clone(),
+                    taxonomy_level: args.level.clone(),
+                    enzyme_site: args.site.clone(),
+                    output_dir: d04.clone(),
+                    g_score_threshold: args.g_score,
+                    verbose: "yes".to_string(),
+                };
+                quantify::run(q_args).context("quantify 阶段失败")?;
+                std::fs::write(&quant_done_marker, b"ok")?;
+            } else {
+                println!("resume=on: 跳过 quantify（已存在）");
+            }
         }
     }
 
     // Step 4: merge
     if args.mode != "db-only" {
-        println!("\n===== [4/4] 合并结果 (merge) =====");
+        let step_num = if args.mode == "sample-only" { "4/5" } else { "4/4" };
+        println!("\n===== [{}] 合并结果 (merge) =====", step_num);
         let merge_done_marker = d05.join(".done");
         if !resume || !merge_done_marker.exists() {
             let list_path = d05.join(format!("{}.merge_list.tsv", args.prefix));
-            build_merge_list_from_quantify(&d04, &list_path)?;
+            if args.mode == "sample-only" {
+                // sample-only 模式：从每个样品的子目录中收集结果
+                build_merge_list_from_sample_quantify(&d04, &list_path)?;
+            } else {
+                build_merge_list_from_quantify(&d04, &list_path)?;
+            }
 
             let m_args = merge::MergeArgs {
                 sample_list: list_path,
@@ -365,7 +539,96 @@ fn build_sample_list_for_quantify(
     Ok(())
 }
 
-/// 从 quantify 结果目录生成 merge 所需列表
+/// 读取样品列表中的样品名称
+fn read_sample_names(list_file: &Path) -> Result<Vec<String>> {
+    let file = File::open(list_file)
+        .with_context(|| format!("无法读取样品列表: {}", list_file.display()))?;
+    let reader = BufReader::new(file);
+    let mut samples = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split('\t').collect();
+        if !parts.is_empty() {
+            samples.push(parts[0].to_string());
+        }
+    }
+    Ok(samples)
+}
+
+/// 获取酶名称
+fn get_enzyme_name(site: &str) -> Result<String> {
+    use crate::enzymes::{enzyme_by_id, enzyme_by_name};
+    if let Ok(site_num) = site.parse::<u8>() {
+        if let Some(enzyme) = enzyme_by_id(site_num) {
+            return Ok(enzyme.name.to_string());
+        }
+    }
+    if let Some(enzyme) = enzyme_by_name(site) {
+        return Ok(enzyme.name.to_string());
+    }
+    bail!("无效的酶名称或编号: {}", site);
+}
+
+/// 从 sample-only 模式的 quantify 结果目录生成 merge 所需列表
+fn build_merge_list_from_sample_quantify(quant_dir: &Path, output_list: &Path) -> Result<()> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(quant_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let sample = entry.file_name().to_string_lossy().to_string();
+        // 递归查找样品目录中的 {sample}.{enzyme}.xls 文件（排除 GCF_detected.xls）
+        let mut found_xls = None;
+        
+        // 递归查找函数
+        fn find_xls_recursive(dir: &Path, sample: &str) -> Option<PathBuf> {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            // 递归查找子目录
+                            if let Some(found) = find_xls_recursive(&path, sample) {
+                                return Some(found);
+                            }
+                        } else if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                            // 查找 {sample}.{enzyme}.xls 格式的文件，排除 GCF_detected.xls
+                            if file_name.ends_with(".xls") 
+                                && !file_name.contains("GCF_detected")
+                                && file_name.starts_with(&format!("{}.", sample)) {
+                                return Some(path);
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        }
+        
+        found_xls = find_xls_recursive(&entry.path(), &sample);
+        
+        if let Some(xls_path) = found_xls {
+            entries.push((sample, xls_path));
+        }
+    }
+
+    if entries.is_empty() {
+        bail!("quantify 结果目录为空：{}", quant_dir.display());
+    }
+
+    let mut w = File::create(output_list)?;
+    for (s, p) in entries {
+        writeln!(w, "{}\t{}", s, p.display())?;
+    }
+    Ok(())
+}
+
+/// 从 quantify 结果目录生成 merge 所需列表（full 模式）
 fn build_merge_list_from_quantify(quant_dir: &Path, output_list: &Path) -> Result<()> {
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(quant_dir)? {
