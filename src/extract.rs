@@ -599,45 +599,45 @@ fn extract_single_tag(
 
         sequence.make_ascii_uppercase();
 
-        // 使用正则表达式查找第一个匹配的标签（与Perl版本一致）
-        if let Some((pos, len)) = enzyme.find_first_tag(&sequence) {
-            enzyme_reads += 1;
-            let tag_seq = &sequence[pos..pos + len];
-            let tag_qual = quality.map(|q| {
-                if pos + len <= q.len() {
-                    &q[pos..pos + len]
-                } else {
-                    &[]
+        // 只查找第一个匹配的标签
+        let mut found = false;
+        for pattern in enzyme.patterns {
+            if sequence.len() < enzyme.tag_length {
+                break;
+            }
+
+            for offset in 0..sequence.len() {
+                if offset + enzyme.tag_length > sequence.len() {
+                    break;
                 }
-            });
 
-            // 质量控制
-            if qc.check_n(tag_seq) {
-                if let Some(qual) = tag_qual {
-                    if qual.is_empty() || qc.check_quality(qual) {
-                        qc_passed += 1;
+                let window = &sequence[offset..offset + enzyme.tag_length];
+                if pattern.matches(window) {
+                    enzyme_reads += 1;
+                    let tag_seq = window;
+                    let tag_qual = quality.map(|q| {
+                        if offset + enzyme.tag_length <= q.len() {
+                            &q[offset..offset + enzyme.tag_length]
+                        } else {
+                            &[]
+                        }
+                    });
 
-                        // 输出标签
-                        match output_format {
-                            OutputFormat::Fasta => {
-                                writeln!(writer, ">{}", std::str::from_utf8(seq_id).unwrap_or("seq"))?;
-                                writeln!(writer, "{}", std::str::from_utf8(tag_seq).unwrap_or(""))?;
-                            }
-                            OutputFormat::Fastq => {
-                                writeln!(writer, "@{}", std::str::from_utf8(seq_id).unwrap_or("seq"))?;
-                                writeln!(writer, "{}", std::str::from_utf8(tag_seq).unwrap_or(""))?;
-                                writeln!(writer, "+")?;
-                                if let Some(qual) = tag_qual {
-                                    writeln!(writer, "{}", std::str::from_utf8(qual).unwrap_or(""))?;
-                                } else {
-                                    writeln!(writer)?;
-                                }
-                            }
+                    // 质量控制
+                    if !qc.check_n(tag_seq) {
+                        found = true;
+                        break;
+                    }
+                    if let Some(qual) = tag_qual {
+                        if !qual.is_empty() && !qc.check_quality(qual) {
+                            found = true;
+                            break;
                         }
                     }
-                } else {
-                    // 没有质量分数，只检查N
+
                     qc_passed += 1;
+
+                    // 输出标签
                     match output_format {
                         OutputFormat::Fasta => {
                             writeln!(writer, ">{}", std::str::from_utf8(seq_id).unwrap_or("seq"))?;
@@ -647,10 +647,21 @@ fn extract_single_tag(
                             writeln!(writer, "@{}", std::str::from_utf8(seq_id).unwrap_or("seq"))?;
                             writeln!(writer, "{}", std::str::from_utf8(tag_seq).unwrap_or(""))?;
                             writeln!(writer, "+")?;
-                            writeln!(writer)?;
+                            if let Some(qual) = tag_qual {
+                                writeln!(writer, "{}", std::str::from_utf8(qual).unwrap_or(""))?;
+                            } else {
+                                writeln!(writer)?;
+                            }
                         }
                     }
+
+                    found = true;
+                    break;
                 }
+            }
+
+            if found {
+                break;
             }
         }
     }
@@ -770,52 +781,47 @@ fn extract_concatenated_tags(
 
             tag_seq.make_ascii_uppercase();
 
-            // 使用正则表达式查找第一个匹配的标签（与Perl版本一致）
-            if let Some((pos, len)) = enzyme.find_first_tag(&tag_seq) {
-                enzyme_reads[tag_idx] += 1;
+            // 检查是否匹配酶切位点（只取第一个匹配）
+            let mut matched = false;
+            for pattern in enzyme.patterns {
+                // 在 tag_seq 中查找第一个匹配
+                if tag_seq.len() < enzyme.tag_length {
+                    break;
+                }
 
-                // 提取匹配的标签
-                let final_tag = &tag_seq[pos..pos + len];
-                let final_qual = tag_qual.and_then(|q| {
-                    if !q.is_empty() && pos + len <= q.len() {
-                        Some(&q[pos..pos + len])
-                    } else {
-                        None
-                    }
-                });
+                for offset in 0..=tag_seq.len().saturating_sub(enzyme.tag_length) {
+                    let window = &tag_seq[offset..offset + enzyme.tag_length];
+                    if pattern.matches(window) {
+                        enzyme_reads[tag_idx] += 1;
 
-                // 质量控制
-                if qc.check_n(final_tag) {
-                    if let Some(qual) = final_qual {
-                        if qual.is_empty() || qc.check_quality(qual) {
-                            qc_passed[tag_idx] += 1;
+                        // 提取匹配的标签
+                        let final_tag = window;
+                        let final_qual = tag_qual.and_then(|q| {
+                            if !q.is_empty() && offset + enzyme.tag_length <= q.len() {
+                                Some(&q[offset..offset + enzyme.tag_length])
+                            } else {
+                                None
+                            }
+                        });
 
-                            // 输出标签
-                            let writer = &mut writers[tag_idx];
-                            let header = format!("{}:{}", std::str::from_utf8(seq_id).unwrap_or("seq"), tag_idx + 1);
-
-                            match output_format {
-                                OutputFormat::Fasta => {
-                                    writeln!(writer, ">{}", header)?;
-                                    writeln!(writer, "{}", std::str::from_utf8(final_tag).unwrap_or(""))?;
-                                }
-                                OutputFormat::Fastq => {
-                                    writeln!(writer, "@{}", header)?;
-                                    writeln!(writer, "{}", std::str::from_utf8(final_tag).unwrap_or(""))?;
-                                    writeln!(writer, "+")?;
-                                    if let Some(qual) = final_qual {
-                                        writeln!(writer, "{}", std::str::from_utf8(qual).unwrap_or(""))?;
-                                    } else {
-                                        writeln!(writer)?;
-                                    }
-                                }
+                        // 质量控制
+                        if !qc.check_n(final_tag) {
+                            matched = true;
+                            break;
+                        }
+                        if let Some(qual) = final_qual {
+                            if !qual.is_empty() && !qc.check_quality(qual) {
+                                matched = true;
+                                break;
                             }
                         }
-                    } else {
-                        // 没有质量分数，只检查N
+
                         qc_passed[tag_idx] += 1;
+
+                        // 输出标签
                         let writer = &mut writers[tag_idx];
                         let header = format!("{}:{}", std::str::from_utf8(seq_id).unwrap_or("seq"), tag_idx + 1);
+
                         match output_format {
                             OutputFormat::Fasta => {
                                 writeln!(writer, ">{}", header)?;
@@ -825,10 +831,21 @@ fn extract_concatenated_tags(
                                 writeln!(writer, "@{}", header)?;
                                 writeln!(writer, "{}", std::str::from_utf8(final_tag).unwrap_or(""))?;
                                 writeln!(writer, "+")?;
-                                writeln!(writer)?;
+                                if let Some(qual) = final_qual {
+                                    writeln!(writer, "{}", std::str::from_utf8(qual).unwrap_or(""))?;
+                                } else {
+                                    writeln!(writer)?;
+                                }
                             }
                         }
+
+                        matched = true;
+                        break;
                     }
+                }
+
+                if matched {
+                    break;
                 }
             }
         }
