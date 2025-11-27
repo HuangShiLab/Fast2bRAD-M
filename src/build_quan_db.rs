@@ -497,14 +497,13 @@ fn collect_tag_taxonomies(
 
         let taxonomy = gcf_to_taxonomy.get(gcf_id).unwrap();
 
-        // Perl 逻辑：先到先得
+        // Perl 逻辑：如果原始序列已存在就用它，否则用反向互补
         let rc_tag = reverse_complement(&tag_seq);
         let canonical_tag = if tag_taxonomy.contains_key(&tag_seq) {
             tag_seq.clone()
-        } else if tag_taxonomy.contains_key(&rc_tag) {
-            rc_tag.clone()
         } else {
-            tag_seq.clone()
+            // 如果原始序列不存在，使用反向互补（与Perl版本一致）
+            rc_tag.clone()
         };
 
         tag_taxonomy
@@ -570,19 +569,18 @@ fn identify_and_output_unique_tags(
         let mut tag_seq = record.seq().to_vec();
         tag_seq.make_ascii_uppercase();
 
-        // Perl 逻辑：判断使用哪个方向
+        // Perl 逻辑：如果原始序列不在 hash 中，用反向互补并翻转 strand
         let rc_tag = reverse_complement(&tag_seq);
         let (final_tag, final_strand) = if tag_taxonomy.contains_key(&tag_seq) {
             (tag_seq.clone(), original_strand.to_string())
-        } else if tag_taxonomy.contains_key(&rc_tag) {
+        } else {
+            // 如果原始序列不在hash中，使用反向互补（与Perl版本一致）
             let flipped_strand = if original_strand == "0" {
                 "1".to_string()
             } else {
                 "0".to_string()
             };
             (rc_tag.clone(), flipped_strand)
-        } else {
-            (tag_seq.clone(), original_strand.to_string())
         };
 
         // 检查是否为特异性标签

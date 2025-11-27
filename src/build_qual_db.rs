@@ -615,15 +615,13 @@ fn collect_tag_taxonomy(
 
         let taxonomy = gcf_to_taxonomy.get(gcf_id).unwrap();
 
-        // Perl 逻辑：先到先得，如果序列已存在就用它，否则用反向互补
+        // Perl 逻辑：如果原始序列已存在就用它，否则用反向互补
         let rc_tag = reverse_complement(&tag_seq);
         let canonical_tag = if tag_taxonomy.contains_key(&tag_seq) {
             tag_seq.clone()
-        } else if tag_taxonomy.contains_key(&rc_tag) {
-            rc_tag.clone()
         } else {
-            // 第一次遇到，选择原始序列
-            tag_seq.clone()
+            // 如果原始序列不存在，使用反向互补（与Perl版本一致）
+            rc_tag.clone()
         };
 
         tag_taxonomy
@@ -690,21 +688,18 @@ fn output_database(
 
         *total_counts.entry(gcf_id.to_string()).or_insert(0) += 1;
 
-        // Perl 逻辑：如果序列不在 hash 中，用反向互补并翻转 strand
+        // Perl 逻辑：如果原始序列不在 hash 中，用反向互补并翻转 strand
         let rc_tag = reverse_complement(&tag_seq);
         let (final_tag, final_strand) = if tag_taxonomy.contains_key(&tag_seq) {
             (tag_seq.clone(), original_strand.to_string())
-        } else if tag_taxonomy.contains_key(&rc_tag) {
-            // 需要反向互补，翻转 strand
+        } else {
+            // 如果原始序列不在hash中，使用反向互补（与Perl版本一致）
             let flipped_strand = if original_strand == "0" {
                 "1".to_string()
             } else {
                 "0".to_string()
             };
             (rc_tag.clone(), flipped_strand)
-        } else {
-            // 不应该发生
-            (tag_seq.clone(), original_strand.to_string())
         };
 
         // 检查是否为特异性标签
