@@ -681,7 +681,7 @@ fn extract_single_tag(
     };
     writeln!(
         stat_file,
-        "{}\t{}\t{}\t{}\t{}\t{:.2}",
+        "{}\t{}\t{}\t{}\t{}\t{:.2}%",
         output_prefix, enzyme.name, input_sequences, enzyme_reads, qc_passed, percent
     )?;
 
@@ -874,7 +874,7 @@ fn extract_concatenated_tags(
         };
         writeln!(
             stat_file,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{:.2}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{:.2}%",
             prefix,
             enzyme.name,
             raw_reads_count,

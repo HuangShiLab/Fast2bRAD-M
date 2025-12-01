@@ -44,7 +44,7 @@ pub fn write_sample_stats(path: &Path, stats: &DigestStats) -> Result<()> {
     writeln!(file, "sample\tenzyme\tinput_sequences\ttag_count\tpercent")?;
     writeln!(
         file,
-        "{}\t{}\t{}\t{}\t{:.2}",
+        "{}\t{}\t{}\t{}\t{:.2}%",
         stats.sample_id,
         stats.enzyme,
         stats.input_sequences,

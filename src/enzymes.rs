@@ -38,7 +38,25 @@ impl Pattern {
     }
 }
 
+// 创建一个静态查找表，大小为 256 (u8 的范围)
+// 只有 ATCGatcg 的位置是 true，其他（包括 N）都是 false
+const ATCG_TABLE: [bool; 256] = {
+    let mut table = [false; 256];
+    table[b'A' as usize] = true; table[b'a' as usize] = true;
+    table[b'T' as usize] = true; table[b't' as usize] = true;
+    table[b'C' as usize] = true; table[b'c' as usize] = true;
+    table[b'G' as usize] = true; table[b'g' as usize] = true;
+    table
+};
+
+#[inline]
+fn is_pure_atcg(window: &[u8]) -> bool {
+    // 这种查表法是 O(1) 的指令，通常比分支判断更快
+    window.iter().all(|&b| ATCG_TABLE[b as usize])
+}
+
 impl Enzyme {
+
     /// 在序列中查找所有匹配的标签位置和长度（去重）
     pub fn find_all_tags(&self, sequence: &[u8]) -> Vec<(usize, usize)> {
         let mut positions = FxHashSet::default();
@@ -50,7 +68,9 @@ impl Enzyme {
                 }
                 let window = &sequence[offset..offset + self.tag_length];
                 if pattern.matches(window) {
-                    positions.insert((offset, self.tag_length));
+                    if is_pure_atcg(window) {
+                        positions.insert((offset, self.tag_length));
+                    }
                 }
             }
         }
