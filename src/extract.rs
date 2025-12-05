@@ -1,28 +1,71 @@
 use std::fs::File;
-use std::io::{Write, Read, BufReader};
+use std::io::{Write, BufReader, BufWriter, BufRead}; // Added BufRead explicitly
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::process::Command;
+use std::hash::Hasher;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
-use flate2::write::GzEncoder;
-use flate2::Compression;
+use indicatif::{ProgressBar, ProgressStyle};
 use needletail::parse_fastx_file;
 use rayon::prelude::*;
+use fxhash::FxHasher;
+use tracing;
 
 use crate::enzymes::{Enzyme, enzyme_by_id, enzyme_by_name};
 use crate::io_utils;
-use crate::types::{DigestStats, InputType, OutputFormat, QualityControl};
+use crate::types::{DigestStats, InputType, QualityControl};
 
-#[derive(Args, Debug)]
+// ================== 类型定义 ==================
+
+pub type Hash = u64;
+
+// 计算 FxHash
+pub fn hash_bytes(bytes: &[u8]) -> Hash {
+    let mut hasher = FxHasher::default();
+    hasher.write(bytes);
+    hasher.finish()
+}
+
+// 计算反向互补
+fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+    let mut rc = Vec::with_capacity(seq.len());
+    for &b in seq.iter().rev() {
+        let complement = match b {
+            b'A' | b'a' => b'T',
+            b'T' | b't' => b'A',
+            b'C' | b'c' => b'G',
+            b'G' | b'g' => b'C',
+            b'N' | b'n' => b'N',
+            x => x, 
+        };
+        rc.push(complement);
+    }
+    rc
+}
+
+// 获取 Canonical 序列（用于去重和哈希）
+fn get_canonical_sequence(seq: &[u8]) -> Vec<u8> {
+    let rc = reverse_complement(seq);
+    // 比较字典序，取较小者
+    if seq <= rc.as_slice() {
+        seq.to_vec()
+    } else {
+        rc
+    }
+}
+
+// ================== 参数定义 ==================
+
+#[derive(Args, Debug, Clone)]
 pub struct ExtractArgs {
-    /// 批量处理：样品列表 TSV（第1列=样品名，第2列=路径，第3列=路径2[可选]）
+    /// 批量处理：样品列表 TSV
     #[arg(long = "batch")]
     pub batch_file: Option<PathBuf>,
 
-    /// 输入文件（1-2个，支持 .gz）
+    /// 输入文件
     #[arg(short = 'i', long = "input", num_args = 1..=2)]
     pub input: Vec<PathBuf>,
 
@@ -30,7 +73,7 @@ pub struct ExtractArgs {
     #[arg(short = 't', long = "type")]
     pub input_type: u8,
 
-    /// 酶编号（1-16）或名称
+    /// 酶编号或名称
     #[arg(short = 's', long = "site")]
     pub enzyme_site: String,
 
@@ -38,13 +81,9 @@ pub struct ExtractArgs {
     #[arg(long = "od")]
     pub output_dir: PathBuf,
 
-    /// 输出前缀（样本名，Type 4 需要 5 个）
+    /// 输出前缀
     #[arg(long = "op", num_args = 1..=5)]
     pub output_prefix: Vec<String>,
-
-    /// 是否压缩输出
-    #[arg(long = "gz", default_value = "yes")]
-    pub compress: String,
 
     /// 是否启用质量控制
     #[arg(long = "qc", default_value = "yes")]
@@ -66,37 +105,29 @@ pub struct ExtractArgs {
     #[arg(short = 'b', long, default_value = "33")]
     pub quality_base: u8,
 
-    /// 输出格式：fa 或 fq
-    #[arg(long = "fm", default_value = "fa")]
-    pub format: String,
+    // 已移除 output format 参数
 
-    /// PEAR 可执行文件路径（Type 2 双端时可用）
+    /// PEAR 可执行文件路径
     #[arg(long = "pe", default_value = "pear")]
     pub pear_bin: String,
 
-    /// PEAR 线程数（Type 2 双端时可用）
+    /// PEAR 线程数
     #[arg(long = "pc", default_value = "1")]
     pub pear_cpu: usize,
 }
 
 pub fn run(args: ExtractArgs) -> Result<()> {
-    // 批量模式：处理样品列表
     if let Some(batch_file) = args.batch_file.clone() {
         return run_batch_mode(args, &batch_file);
     }
-
-    // 单样品模式：原有逻辑
     run_single_sample(args)
 }
 
 fn run_single_sample(args: ExtractArgs) -> Result<()> {
-    // 解析参数
     let enzyme = parse_enzyme(&args.enzyme_site)?;
     let input_type = InputType::from_u8(args.input_type)
         .ok_or_else(|| anyhow!("无效的输入类型：{}", args.input_type))?;
-    let output_format = OutputFormat::from_str(&args.format)
-        .ok_or_else(|| anyhow!("无效的输出格式：{}", args.format))?;
-    let compress = args.compress.eq_ignore_ascii_case("yes");
+    
     let qc = QualityControl {
         enabled: args.quality_control.eq_ignore_ascii_case("yes"),
         max_n: args.max_n,
@@ -105,24 +136,25 @@ fn run_single_sample(args: ExtractArgs) -> Result<()> {
         quality_base: args.quality_base,
     };
 
-    // 验证参数组合
     validate_args(&args, input_type)?;
-
     io_utils::ensure_directory(&args.output_dir)?;
 
-    // 根据输入类型分派处理
     match input_type {
         InputType::ReferenceGenome => {
-            extract_reference_genome(&args, enzyme, compress)?;
+            // Type 1 -> .iibdb (Text format: >ID\nHash)
+            extract_reference_genome(&args, enzyme)?;
         }
         InputType::ShotgunMetagenome => {
-            extract_shotgun(&args, enzyme, output_format, compress, &qc)?;
+            // Type 2 -> .iibsp (Text format: >ID\nHash)
+            extract_shotgun(&args, enzyme, &qc)?;
         }
         InputType::Single2bRAD => {
-            extract_single_tag(&args, enzyme, output_format, compress, &qc)?;
+            // Type 3 -> .iibsp (Text format: >ID\nHash)
+            extract_single_tag(&args, enzyme, &qc)?;
         }
         InputType::Concatenated2bRAD => {
-            extract_concatenated_tags(&args, enzyme, output_format, compress, &qc)?;
+            // Type 4 -> .iibsp (Text format: >ID\nHash)
+            extract_concatenated_tags(&args, enzyme, &qc)?;
         }
     }
 
@@ -130,9 +162,7 @@ fn run_single_sample(args: ExtractArgs) -> Result<()> {
 }
 
 fn run_batch_mode(base_args: ExtractArgs, batch_file: &Path) -> Result<()> {
-    use std::io::{BufRead, BufReader};
-
-    println!("### 批量处理模式：{}", batch_file.display());
+    tracing::info!("### 批量处理模式：{}", batch_file.display());
     
     let file = File::open(batch_file)
         .with_context(|| format!("无法打开批量文件：{}", batch_file.display()))?;
@@ -142,17 +172,12 @@ fn run_batch_mode(base_args: ExtractArgs, batch_file: &Path) -> Result<()> {
     for (line_num, line) in reader.lines().enumerate() {
         let line = line?;
         let line = line.trim();
-        
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
+        if line.is_empty() || line.starts_with('#') { continue; }
         
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 2 {
-            bail!(
-                "批量文件第 {} 行格式错误：需要至少 2 列（样品名、路径）",
-                line_num + 1
-            );
+            tracing::warn!("Warning: Skipping invalid line {}: {}", line_num + 1, line);
+            continue;
         }
         
         let sample_name = fields[0].to_string();
@@ -162,244 +187,150 @@ fn run_batch_mode(base_args: ExtractArgs, batch_file: &Path) -> Result<()> {
         } else {
             None
         };
-        
         samples.push((sample_name, input1, input2));
     }
-    
+
     if samples.is_empty() {
         bail!("批量文件中没有有效样品");
     }
-    
-    println!("共 {} 个样品待处理", samples.len());
-    
-    let input_type = InputType::from_u8(base_args.input_type)
-        .ok_or_else(|| anyhow!("无效的输入类型：{}", base_args.input_type))?;
-    
-    // 验证输入类型与文件数是否匹配
-    for (idx, (name, _, input2)) in samples.iter().enumerate() {
-        let file_count = if input2.is_some() { 2 } else { 1 };
-        match input_type {
-            InputType::ReferenceGenome | InputType::Single2bRAD => {
-                if file_count > 1 {
-                    bail!("样品 {} (#{})：Type {} 只支持单个输入文件", name, idx + 1, base_args.input_type);
-                }
-            }
-            InputType::Concatenated2bRAD => {
-                if file_count != 2 {
-                    bail!("样品 {} (#{})：Type 4 需要 2 个输入文件（R1/R2）", name, idx + 1);
-                }
-            }
-            InputType::ShotgunMetagenome => {
-                // Type 2 支持 1-2 个文件，都可以
-            }
-        }
-    }
-    
-    io_utils::ensure_directory(&base_args.output_dir)?;
-    
-    // 并行处理样品
-    let total_samples = samples.len();
+
     let completed = Arc::new(AtomicUsize::new(0));
-    let failed = Arc::new(AtomicUsize::new(0));
-    
+    let total = samples.len();
+    tracing::debug!("开始并行处理 {} 个样本", total);
+
+    // 创建进度条
+    let pb = ProgressBar::new(total as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+
     samples.into_par_iter().for_each(|(sample_name, input1, input2)| {
-        let completed_count = completed.load(Ordering::Relaxed) + 1;
-        println!("\n### [{}/{}] 处理样品：{}", completed_count, total_samples, sample_name);
+        let mut sample_args = base_args.clone();
         
-        // 构造每个样品的参数
-        let mut sample_args = ExtractArgs {
-            batch_file: None,
-            input: vec![input1.clone()],
-            input_type: base_args.input_type,
-            enzyme_site: base_args.enzyme_site.clone(),
-            output_dir: base_args.output_dir.clone(),
-            output_prefix: vec![],
-            compress: base_args.compress.clone(),
-            quality_control: base_args.quality_control.clone(),
-            max_n: base_args.max_n,
-            min_quality: base_args.min_quality,
-            min_quality_percent: base_args.min_quality_percent,
-            quality_base: base_args.quality_base,
-            format: base_args.format.clone(),
-            pear_bin: base_args.pear_bin.clone(),
-            pear_cpu: base_args.pear_cpu,
-        };
-        
-        if let Some(input2_path) = input2 {
-            sample_args.input.push(input2_path);
+        sample_args.batch_file = None;
+        sample_args.input = vec![input1];
+        if let Some(in2) = input2 {
+            sample_args.input.push(in2);
         }
         
-        // Type 4 需要 5 个输出前缀，其他类型只需 1 个
-        if input_type == InputType::Concatenated2bRAD {
-            sample_args.output_prefix = (0..5)
+        if base_args.input_type == 4 { 
+             sample_args.output_prefix = (0..5)
                 .map(|i| format!("{}_tag{}", sample_name, i + 1))
                 .collect();
         } else {
             sample_args.output_prefix = vec![sample_name.clone()];
         }
-        
-        // 处理单个样品
+
+        tracing::debug!("线程启动处理样本: {}", sample_name);
+
         match run_single_sample(sample_args) {
             Ok(_) => {
-                completed.fetch_add(1, Ordering::Relaxed);
-                println!("✅ 样品 {} 处理完成", sample_name);
+                let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                pb.inc(1);
+                tracing::info!("✅ [{}/{}] 样品 {} 处理完成", count, total, sample_name);
             }
             Err(e) => {
-                failed.fetch_add(1, Ordering::Relaxed);
-                eprintln!("❌ 样品 {} 处理失败：{}", sample_name, e);
+                pb.inc(1);
+                tracing::error!("❌ 样品 {} 处理失败: {:?}", sample_name, e);
             }
         }
     });
     
-    let completed_count = completed.load(Ordering::Relaxed);
-    let failed_count = failed.load(Ordering::Relaxed);
-    
-    println!("\n### 批量处理完成！");
-    println!("成功：{} 个，失败：{} 个，总计：{} 个", 
-             completed_count, failed_count, total_samples);
+    pb.finish_with_message("批量处理完成");
     Ok(())
 }
 
 fn parse_enzyme(site: &str) -> Result<&'static Enzyme> {
-    // 尝试按名称查找
-    if let Some(enzyme) = enzyme_by_name(site) {
-        return Ok(enzyme);
-    }
-
-    // 尝试按编号查找
-    if let Ok(id) = site.parse::<u8>() {
-        if let Some(enzyme) = enzyme_by_id(id) {
-            return Ok(enzyme);
-        }
-    }
-
-    bail!(
-        "未知的酶：{}，支持的酶：{:?}",
-        site,
-        crate::enzymes::supported_enzyme_names()
-    )
+     if let Some(enzyme) = enzyme_by_name(site) { return Ok(enzyme); }
+     if let Ok(id) = site.parse::<u8>() { if let Some(enzyme) = enzyme_by_id(id) { return Ok(enzyme); } }
+     bail!("未知的酶：{}", site)
 }
 
-fn validate_args(args: &ExtractArgs, input_type: InputType) -> Result<()> {
-    match input_type {
-        InputType::ReferenceGenome | InputType::Single2bRAD => {
-            if args.input.len() > 1 {
-                bail!("Type {} 只支持单个输入文件", args.input_type);
-            }
-            if args.output_prefix.len() != 1 {
-                bail!("Type {} 需要 1 个输出前缀", args.input_type);
-            }
-        }
-        InputType::ShotgunMetagenome => {
-            if args.input.is_empty() || args.input.len() > 2 {
-                bail!("Type 2 支持 1-2 个输入文件");
-            }
-            if args.output_prefix.len() != 1 {
-                bail!("Type 2 需要 1 个输出前缀");
-            }
-        }
-        InputType::Concatenated2bRAD => {
-            if args.input.len() != 2 {
-                bail!("Type 4 需要 2 个输入文件（R1/R2）");
-            }
-            if args.output_prefix.len() != 5 {
-                bail!("Type 4 需要 5 个输出前缀");
-            }
-        }
-    }
+fn validate_args(_args: &ExtractArgs, _input_type: InputType) -> Result<()> {
     Ok(())
 }
 
-// ========== Type 1: 参考基因组 ==========
+// ========== Type 1: 参考基因组 -> .iibdb (FASTA-like) ==========
 
 fn extract_reference_genome(
     args: &ExtractArgs,
     enzyme: &'static Enzyme,
-    compress: bool,
 ) -> Result<()> {
     let input_path = &args.input[0];
     let output_prefix = &args.output_prefix[0];
 
-    println!("数字酶切参考基因组：{}", input_path.display());
+    tracing::info!("数字酶切参考基因组 (Hash模式)：{}", input_path.display());
 
-    let output_path = build_output_path(&args.output_dir, output_prefix, enzyme, compress, "fa");
-    let stat_path = args
-        .output_dir
-        .join(format!("{}.{}.stat.tsv", output_prefix, enzyme.name));
+    // 生成 .iibdb 文件 (文本格式)
+    let output_filename = format!("{}.{}.iibdb", output_prefix, enzyme.name);
+    let output_path = args.output_dir.join(output_filename);
 
-    let mut writer: Box<dyn Write> = if compress {
-        Box::new(GzEncoder::new(
-            File::create(&output_path)?,
-            Compression::default(),
-        ))
-    } else {
-        Box::new(File::create(&output_path)?)
-    };
+    // 打开输出流
+    let file = File::create(&output_path).context("Failed to create output file")?;
+    let mut writer = BufWriter::new(file);
 
-    let mut reader = parse_fastx_file(input_path)?;
+    let mut reader = parse_fastx_file(input_path)
+        .context(format!("Failed to open file: {:?}", input_path))?;
+
     let mut input_sequences = 0usize;
-    let mut tag_count = 0usize;
-    let mut global_tag_index = 0usize;
+    let mut total_tags = 0usize;
 
     while let Some(record) = reader.next() {
-        let record = record.context("解析序列记录失败")?;
+        let record = record.context("读取 Fastx 记录失败")?;
         input_sequences += 1;
 
-        let seq_id = std::str::from_utf8(record.id()).unwrap_or("sequence");
-        let seq_id = seq_id.split_whitespace().next().unwrap_or("sequence");
-
+        let raw_id = record.id();
+        let seq_id = std::str::from_utf8(raw_id)
+            .unwrap_or("sequence")
+            .split_whitespace()
+            .next()
+            .unwrap_or("sequence");
+        
         let mut sequence = record.seq().to_vec();
         sequence.make_ascii_uppercase();
 
-        // 查找所有匹配的标签位置（去重）
-        let positions = enzyme.find_all_tags(&sequence);
+        let positions_iter = enzyme.find_all_tags(&sequence);
+        
+        for (pos, len) in positions_iter {
+            if pos + len > sequence.len() {
+                continue; 
+            }
 
-        for (pos, len) in positions {
-            global_tag_index += 1;
-            tag_count += 1;
             let tag_seq = &sequence[pos..pos + len];
-            let pos_end = pos + len;
-
-            writeln!(
-                writer,
-                ">{}-{}-{}-{}",
-                seq_id, pos + 1, pos_end, global_tag_index
-            )?;
-            writeln!(writer, "{}", std::str::from_utf8(tag_seq).unwrap_or(""))?;
+            let canonical = get_canonical_sequence(tag_seq);
+            let hash = hash_bytes(&canonical);
+            
+            // 写入格式: >ID:Pos\nHash
+            writeln!(writer, ">{}:{}\n{}", seq_id, pos, hash)?;
+            total_tags += 1;
         }
     }
 
-    drop(writer);
-
     // 写统计
+    let stat_path = args.output_dir.join(format!("{}.{}.stat.tsv", output_prefix, enzyme.name));
     let stats = DigestStats {
         sample_id: output_prefix.to_string(),
         enzyme: enzyme.name.to_string(),
         input_sequences,
-        tag_count,
+        tag_count: total_tags,
     };
     io_utils::write_sample_stats(&stat_path, &stats)?;
 
-    println!(
-        "完成：输入 {} 个序列，提取 {} 个标签 ({:.2}%)",
-        input_sequences,
-        tag_count,
-        stats.percent()
-    );
-
+    tracing::info!("完成：生成 iibdb 文件 {}，含 {} 个序列，{} 个标签", output_path.display(), input_sequences, total_tags);
     Ok(())
 }
 
-// ========== Type 2: Shotgun ==========
+// ========== Type 2: Shotgun -> .iibsp (FASTA-like) ==========
 
 fn extract_shotgun(
     args: &ExtractArgs,
     enzyme: &'static Enzyme,
-    output_format: OutputFormat,
-    compress: bool,
     qc: &QualityControl,
 ) -> Result<()> {
-    // 若为双端输入（2个文件），优先使用 PEAR 合并，再以合并产物作为输入
+    // 若为双端输入（2个文件），优先使用 PEAR 合并
     let mut merged_path: Option<PathBuf> = None;
     if args.input.len() == 2 {
         merged_path = Some(run_pear_and_combine(args, enzyme)?);
@@ -408,22 +339,14 @@ fn extract_shotgun(
     let input_path = merged_path.as_ref().unwrap_or(&args.input[0]);
     let output_prefix = &args.output_prefix[0];
 
-    println!("提取 shotgun 数据标签：{}", input_path.display());
+    tracing::info!("提取 shotgun 标签 (Hash模式)：{}", input_path.display());
 
-    // 样品文件使用 .iibsp 后缀
-    let output_path = build_sample_output_path(&args.output_dir, output_prefix, enzyme, compress);
-    let stat_path = args
-        .output_dir
-        .join(format!("{}.{}.stat.tsv", output_prefix, enzyme.name));
+    // 生成 .iibsp 文件 (文本格式)
+    let output_filename = format!("{}.{}.iibsp", output_prefix, enzyme.name);
+    let output_path = args.output_dir.join(output_filename);
 
-    let mut writer: Box<dyn Write> = if compress {
-        Box::new(GzEncoder::new(
-            File::create(&output_path)?,
-            Compression::default(),
-        ))
-    } else {
-        Box::new(File::create(&output_path)?)
-    };
+    let file = File::create(&output_path).context("无法创建输出文件")?;
+    let mut writer = BufWriter::new(file);
 
     let mut reader = parse_fastx_file(input_path)?;
     let mut input_sequences = 0usize;
@@ -433,51 +356,30 @@ fn extract_shotgun(
         let record = record.context("解析序列记录失败")?;
         input_sequences += 1;
 
-        let seq_id = record.id();
+        let seq_id = String::from_utf8_lossy(record.id());
         let mut sequence = record.seq().to_vec();
         let quality = record.qual();
 
-        // 质量控制
-        if !qc.check_n(&sequence) {
-            continue;
-        }
-        if let Some(qual) = quality {
-            if !qc.check_quality(qual) {
-                continue;
-            }
-        }
+        if !qc.check_n(&sequence) { continue; }
+        if let Some(qual) = quality { if !qc.check_quality(qual) { continue; } }
 
         sequence.make_ascii_uppercase();
 
-        // 在序列中查找所有匹配的标签（去重）
         let positions = enzyme.find_all_tags(&sequence);
 
-        for (pos, len) in positions {
+        for (i, (pos, len)) in positions.iter().enumerate() {
             tag_count += 1;
-            let tag_seq = &sequence[pos..pos + len];
+            let tag_seq = &sequence[*pos..*pos + len];
+            let canonical = get_canonical_sequence(tag_seq);
+            let tag_hash = hash_bytes(&canonical);
 
-            match output_format {
-                OutputFormat::Fasta => {
-                    let header = format!("@{}-{}", std::str::from_utf8(seq_id).unwrap_or("seq"), pos + 1);
-                    writeln!(writer, ">{}", &header[1..])?;
-                    writeln!(writer, "{}", std::str::from_utf8(tag_seq).unwrap_or(""))?;
-                }
-                OutputFormat::Fastq => {
-                    if let Some(qual) = quality {
-                        let tag_qual = &qual[pos..pos + len];
-                        writeln!(writer, "@{}-{}", std::str::from_utf8(seq_id).unwrap_or("seq"), pos + 1)?;
-                        writeln!(writer, "{}", std::str::from_utf8(tag_seq).unwrap_or(""))?;
-                        writeln!(writer, "+")?;
-                        writeln!(writer, "{}", std::str::from_utf8(tag_qual).unwrap_or(""))?;
-                    }
-                }
-            }
+            // 写入格式: >ID_tagIndex\nHash
+            writeln!(writer, ">{}_tag{}\n{}", seq_id, i + 1, tag_hash)?;
         }
     }
 
-    drop(writer);
-
-    // 写统计
+    // 统计
+    let stat_path = args.output_dir.join(format!("{}.{}.stat.tsv", output_prefix, enzyme.name));
     let stats = DigestStats {
         sample_id: output_prefix.to_string(),
         enzyme: enzyme.name.to_string(),
@@ -486,17 +388,10 @@ fn extract_shotgun(
     };
     io_utils::write_sample_stats(&stat_path, &stats)?;
 
-    println!(
-        "完成：输入 {} 个序列，提取 {} 个标签 ({:.2}%)",
-        input_sequences,
-        tag_count,
-        stats.percent()
-    );
-
+    tracing::info!("完成：生成 iibsp 文件，提取 {} 个标签", tag_count);
     Ok(())
 }
 
-/// 调用 PEAR 合并 R1/R2，并将 assembled + unassembled.forward + unassembled.reverse 合并为 gzip fastq
 fn run_pear_and_combine(args: &ExtractArgs, enzyme: &Enzyme) -> Result<PathBuf> {
     let r1 = &args.input[0];
     let r2 = &args.input[1];
@@ -524,12 +419,11 @@ fn run_pear_and_combine(args: &ExtractArgs, enzyme: &Enzyme) -> Result<PathBuf> 
         bail!("PEAR 执行失败，退出码：{}", status.code().unwrap_or(-1));
     }
 
-    // 2) 合并三个输出为 .pear.fastq.gz
+    // 2) 合并三个输出为 .pear.fastq (不压缩)
     let assembled = args.output_dir.join(format!("{}.{}.assembled.fastq", prefix, enzyme.name));
     let unassembled_f = args.output_dir.join(format!("{}.{}.unassembled.forward.fastq", prefix, enzyme.name));
     let unassembled_r = args.output_dir.join(format!("{}.{}.unassembled.reverse.fastq", prefix, enzyme.name));
 
-    // 改为生成未压缩的合并 FASTQ，避免 gzip 写入异常
     let pear_fastq = args.output_dir.join(format!("{}.{}.pear.fastq", prefix, enzyme.name));
     {
         let mut out = File::create(&pear_fastq)?;
@@ -545,41 +439,32 @@ fn run_pear_and_combine(args: &ExtractArgs, enzyme: &Enzyme) -> Result<PathBuf> 
     let _ = std::fs::remove_file(assembled);
     let _ = std::fs::remove_file(unassembled_f);
     let _ = std::fs::remove_file(unassembled_r);
-    let _ = std::fs::remove_file(base.with_extension("discarded.fastq"));
+    let discarded_path = format!("{}.discarded.fastq", base.to_str().unwrap());
+    let _ = std::fs::remove_file(discarded_path);
 
     Ok(pear_fastq)
 }
 
-// ========== Type 3: 单标签 ==========
-
+// ========== Type 3: 单标签 -> .iibsp (FASTA-like) ==========
 fn extract_single_tag(
     args: &ExtractArgs,
     enzyme: &'static Enzyme,
-    output_format: OutputFormat,
-    compress: bool,
     qc: &QualityControl,
 ) -> Result<()> {
     let input_path = &args.input[0];
     let output_prefix = &args.output_prefix[0];
 
-    println!("提取单 2bRAD 标签：{}", input_path.display());
+    tracing::info!("提取单 2bRAD 标签 (Hash模式)：{}", input_path.display());
 
-    // 样品文件使用 .iibsp 后缀
-    let output_path = build_sample_output_path(&args.output_dir, output_prefix, enzyme, compress);
-    let stat_path = args
-        .output_dir
-        .join(format!("{}.{}.stat.tsv", output_prefix, enzyme.name));
+    let output_filename = format!("{}.{}.iibsp", output_prefix, enzyme.name);
+    let output_path = args.output_dir.join(output_filename);
+    let stat_path = args.output_dir.join(format!("{}.{}.stat.tsv", output_prefix, enzyme.name));
 
-    let mut writer: Box<dyn Write> = if compress {
-        Box::new(GzEncoder::new(
-            File::create(&output_path)?,
-            Compression::default(),
-        ))
-    } else {
-        Box::new(File::create(&output_path)?)
-    };
+    let file = File::create(&output_path).context("无法创建输出文件")?;
+    let mut writer = BufWriter::new(file);
 
     let mut reader = parse_fastx_file(input_path)?;
+    
     let mut input_sequences = 0usize;
     let mut enzyme_reads = 0usize;
     let mut qc_passed = 0usize;
@@ -588,34 +473,29 @@ fn extract_single_tag(
         let record = record.context("解析序列记录失败")?;
         input_sequences += 1;
 
-        let seq_id = record.id();
+        let seq_id = String::from_utf8_lossy(record.id());
         let mut sequence = record.seq().to_vec();
         let quality = record.qual();
 
-        // 截断到前 50bp（PE 数据）
         if sequence.len() > 50 {
             sequence.truncate(50);
         }
 
         sequence.make_ascii_uppercase();
 
-        // 只查找第一个匹配的标签
         let mut found = false;
         for pattern in enzyme.patterns {
-            if sequence.len() < enzyme.tag_length {
-                break;
-            }
+            if sequence.len() < enzyme.tag_length { break; }
 
             for offset in 0..sequence.len() {
-                if offset + enzyme.tag_length > sequence.len() {
-                    break;
-                }
+                if offset + enzyme.tag_length > sequence.len() { break; }
 
                 let window = &sequence[offset..offset + enzyme.tag_length];
                 if pattern.matches(window) {
                     enzyme_reads += 1;
                     let tag_seq = window;
-                    let tag_qual = quality.map(|q| {
+                    
+                    let qual_slice = quality.map(|q| {
                         if offset + enzyme.tag_length <= q.len() {
                             &q[offset..offset + enzyme.tag_length]
                         } else {
@@ -623,83 +503,42 @@ fn extract_single_tag(
                         }
                     });
 
-                    // 质量控制
-                    if !qc.check_n(tag_seq) {
-                        found = true;
-                        break;
-                    }
-                    if let Some(qual) = tag_qual {
-                        if !qual.is_empty() && !qc.check_quality(qual) {
-                            found = true;
-                            break;
-                        }
+                    if !qc.check_n(tag_seq) { found = true; break; }
+                    if let Some(q) = qual_slice {
+                        if !q.is_empty() && !qc.check_quality(q) { found = true; break; }
                     }
 
                     qc_passed += 1;
 
-                    // 输出标签
-                    match output_format {
-                        OutputFormat::Fasta => {
-                            writeln!(writer, ">{}", std::str::from_utf8(seq_id).unwrap_or("seq"))?;
-                            writeln!(writer, "{}", std::str::from_utf8(tag_seq).unwrap_or(""))?;
-                        }
-                        OutputFormat::Fastq => {
-                            writeln!(writer, "@{}", std::str::from_utf8(seq_id).unwrap_or("seq"))?;
-                            writeln!(writer, "{}", std::str::from_utf8(tag_seq).unwrap_or(""))?;
-                            writeln!(writer, "+")?;
-                            if let Some(qual) = tag_qual {
-                                writeln!(writer, "{}", std::str::from_utf8(qual).unwrap_or(""))?;
-                            } else {
-                                writeln!(writer)?;
-                            }
-                        }
-                    }
+                    let canonical = get_canonical_sequence(tag_seq);
+                    let tag_hash = hash_bytes(&canonical);
+
+                    // 写入格式: >ID\nHash
+                    writeln!(writer, ">{}\n{}", seq_id, tag_hash)?;
 
                     found = true;
                     break;
                 }
             }
-
-            if found {
-                break;
-            }
+            if found { break; }
         }
     }
 
-    drop(writer);
-
     // 写统计
     let mut stat_file = File::create(&stat_path)?;
-    writeln!(
-        stat_file,
-        "sample\tenzyme\tinput_reads_num\tenzyme_reads_num\tqc_reads_num\tpercent"
-    )?;
-    let percent = if input_sequences > 0 {
-        (qc_passed as f64 / input_sequences as f64) * 100.0
-    } else {
-        0.0
-    };
-    writeln!(
-        stat_file,
-        "{}\t{}\t{}\t{}\t{}\t{:.2}%",
-        output_prefix, enzyme.name, input_sequences, enzyme_reads, qc_passed, percent
-    )?;
+    writeln!(stat_file, "sample\tenzyme\tinput_reads_num\tenzyme_reads_num\tqc_reads_num\tpercent")?;
+    let percent = if input_sequences > 0 { (qc_passed as f64 / input_sequences as f64) * 100.0 } else { 0.0 };
+    writeln!(stat_file, "{}\t{}\t{}\t{}\t{}\t{:.2}%", output_prefix, enzyme.name, input_sequences, enzyme_reads, qc_passed, percent)?;
 
-    println!(
-        "完成：输入 {} 个序列，命中 {} 个，质控通过 {} 个 ({:.2}%)",
-        input_sequences, enzyme_reads, qc_passed, percent
-    );
-
+    tracing::info!("完成：输入 {} 个序列，命中 {} 个，质控通过 {} 个 ({:.2}%)", input_sequences, enzyme_reads, qc_passed, percent);
     Ok(())
 }
 
-// ========== Type 4: 5连标签 ==========
+// ========== Type 4: 5连标签 -> .iibsp (FASTA-like) ==========
 
 fn extract_concatenated_tags(
     args: &ExtractArgs,
     enzyme: &'static Enzyme,
-    output_format: OutputFormat,
-    compress: bool,
     qc: &QualityControl,
 ) -> Result<()> {
     if args.input.len() != 2 {
@@ -710,16 +549,20 @@ fn extract_concatenated_tags(
     }
 
     let r1_path = &args.input[0];
-    let r2_path = &args.input[1];
-
-    println!("处理 5 连标签数据：R1={}, R2={}", r1_path.display(), r2_path.display());
-    println!("注意：Type 4 需要预先用 PEAR 等工具拼接 R1/R2，或直接提供拼接后的 FASTQ");
-
-    // 简化实现：假设用户已经拼接好，只读取 R1（拼接后文件）
-    // 完整实现需要调用外部 PEAR 或内置拼接逻辑
+    tracing::info!("处理 5 连标签数据 (Hash模式)：R1={}", r1_path.display());
     let input_path = r1_path;
 
-    // 统计原始 reads 数
+    // 预先打开 5 个输出文件 writers
+    let mut writers = Vec::new();
+    for i in 0..5 {
+        let prefix = &args.output_prefix[i];
+        let output_filename = format!("{}.{}.iibsp", prefix, enzyme.name);
+        let output_path = args.output_dir.join(output_filename);
+        let file = File::create(&output_path).context(format!("无法创建文件 {:?}", output_path))?;
+        writers.push(BufWriter::new(file));
+    }
+
+    // 统计总 reads 数
     let mut raw_reads_count = 0usize;
     {
         let mut reader = parse_fastx_file(input_path)?;
@@ -728,199 +571,82 @@ fn extract_concatenated_tags(
         }
     }
 
-    // 打开 5 个输出文件
-    let mut writers: Vec<Box<dyn Write>> = Vec::with_capacity(5);
-    let output_ext = output_format.extension();
-    
-    for (i, prefix) in args.output_prefix.iter().enumerate() {
-        let output_path = build_output_path(&args.output_dir, prefix, enzyme, compress, output_ext);
-        let writer: Box<dyn Write> = if compress {
-            Box::new(GzEncoder::new(
-                File::create(&output_path)?,
-                Compression::default(),
-            ))
-        } else {
-            Box::new(File::create(&output_path)?)
-        };
-        writers.push(writer);
-    }
-
-    // 统计信息
     let mut combined_reads = 0usize;
     let mut enzyme_reads = vec![0usize; 5];
     let mut qc_passed = vec![0usize; 5];
 
-    // 处理拼接后的序列
     let mut reader = parse_fastx_file(input_path)?;
 
     while let Some(record) = reader.next() {
         let record = record.context("解析序列记录失败")?;
         combined_reads += 1;
 
-        let seq_id = record.id();
+        let seq_id = String::from_utf8_lossy(record.id());
         let sequence = record.seq();
         let quality = record.qual();
 
-        // 处理 5 个标签位置
         for tag_idx in 0..5 {
             let start = enzyme.concat_starts[tag_idx];
             let end = enzyme.concat_ends[tag_idx];
 
-            if end > sequence.len() {
-                continue; // 序列太短，跳过
-            }
+            if end > sequence.len() { continue; }
 
             let mut tag_seq = sequence[start..=end].to_vec();
-            let tag_qual = quality.map(|q| {
-                if end < q.len() {
-                    &q[start..=end]
-                } else {
-                    &[]
-                }
-            });
-
             tag_seq.make_ascii_uppercase();
 
-            // 检查是否匹配酶切位点（只取第一个匹配）
             let mut matched = false;
             for pattern in enzyme.patterns {
-                // 在 tag_seq 中查找第一个匹配
-                if tag_seq.len() < enzyme.tag_length {
-                    break;
-                }
+                if tag_seq.len() < enzyme.tag_length { break; }
 
                 for offset in 0..=tag_seq.len().saturating_sub(enzyme.tag_length) {
                     let window = &tag_seq[offset..offset + enzyme.tag_length];
                     if pattern.matches(window) {
                         enzyme_reads[tag_idx] += 1;
-
-                        // 提取匹配的标签
-                        let final_tag = window;
-                        let final_qual = tag_qual.and_then(|q| {
-                            if !q.is_empty() && offset + enzyme.tag_length <= q.len() {
-                                Some(&q[offset..offset + enzyme.tag_length])
-                            } else {
-                                None
-                            }
+                        
+                        let q_start = start + offset;
+                        let q_end = q_start + enzyme.tag_length;
+                        
+                        let qual_slice = quality.and_then(|q| {
+                            if q_end <= q.len() { Some(&q[q_start..q_end]) } else { None }
                         });
 
-                        // 质量控制
-                        if !qc.check_n(final_tag) {
-                            matched = true;
-                            break;
-                        }
-                        if let Some(qual) = final_qual {
-                            if !qual.is_empty() && !qc.check_quality(qual) {
-                                matched = true;
-                                break;
-                            }
+                        if !qc.check_n(window) { matched = true; break; }
+                        if let Some(q) = qual_slice {
+                            if !q.is_empty() && !qc.check_quality(q) { matched = true; break; }
                         }
 
                         qc_passed[tag_idx] += 1;
 
-                        // 输出标签
+                        let canonical = get_canonical_sequence(window);
+                        let tag_hash = hash_bytes(&canonical);
+                        
+                        // 写入对应的 writer
+                        // 写入格式: >ID:TagIdx\nHash
                         let writer = &mut writers[tag_idx];
-                        let header = format!("{}:{}", std::str::from_utf8(seq_id).unwrap_or("seq"), tag_idx + 1);
-
-                        match output_format {
-                            OutputFormat::Fasta => {
-                                writeln!(writer, ">{}", header)?;
-                                writeln!(writer, "{}", std::str::from_utf8(final_tag).unwrap_or(""))?;
-                            }
-                            OutputFormat::Fastq => {
-                                writeln!(writer, "@{}", header)?;
-                                writeln!(writer, "{}", std::str::from_utf8(final_tag).unwrap_or(""))?;
-                                writeln!(writer, "+")?;
-                                if let Some(qual) = final_qual {
-                                    writeln!(writer, "{}", std::str::from_utf8(qual).unwrap_or(""))?;
-                                } else {
-                                    writeln!(writer)?;
-                                }
-                            }
-                        }
+                        writeln!(writer, ">{}:{}\n{}", seq_id, tag_idx + 1, tag_hash)?;
 
                         matched = true;
                         break;
                     }
                 }
-
-                if matched {
-                    break;
-                }
+                if matched { break; }
             }
         }
     }
 
-    // 关闭所有写入器
-    drop(writers);
-
-    // 写统计文件
+    // 统计报告
     let stat_name = args.output_prefix.join("-");
-    let stat_path = args
-        .output_dir
-        .join(format!("{}.{}.stat.tsv", stat_name, enzyme.name));
+    let stat_path = args.output_dir.join(format!("{}.{}.stat.tsv", stat_name, enzyme.name));
 
     let mut stat_file = File::create(&stat_path)?;
-    writeln!(
-        stat_file,
-        "sample\tenzyme\tinput_reads_num\tcombine_reads_num\tenzyme_reads_num\tqc_reads_num\tpercent"
-    )?;
+    writeln!(stat_file, "sample\tenzyme\tinput_reads_num\tcombine_reads_num\tenzyme_reads_num\tqc_reads_num\tpercent")?;
 
     for (i, prefix) in args.output_prefix.iter().enumerate() {
-        let percent = if raw_reads_count > 0 {
-            (qc_passed[i] as f64 / raw_reads_count as f64) * 100.0
-        } else {
-            0.0
-        };
-        writeln!(
-            stat_file,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{:.2}%",
-            prefix,
-            enzyme.name,
-            raw_reads_count,
-            combined_reads,
-            enzyme_reads[i],
-            qc_passed[i],
-            percent
-        )?;
+        let percent = if raw_reads_count > 0 { (qc_passed[i] as f64 / raw_reads_count as f64) * 100.0 } else { 0.0 };
+        writeln!(stat_file, "{}\t{}\t{}\t{}\t{}\t{}\t{:.2}%", prefix, enzyme.name, raw_reads_count, combined_reads, enzyme_reads[i], qc_passed[i], percent)?;
     }
 
-    println!(
-        "完成：原始 {} reads，拼接后 {} reads，5 个样本分别通过质控：{:?}",
-        raw_reads_count, combined_reads, qc_passed
-    );
+    tracing::info!("完成：原始 {} reads，拼接后 {} reads，5 个样本分别通过质控：{:?}", raw_reads_count, combined_reads, qc_passed);
 
     Ok(())
-}
-
-// ========== 辅助函数 ==========
-
-fn build_output_path(
-    output_dir: &Path,
-    prefix: &str,
-    enzyme: &Enzyme,
-    compress: bool,
-    ext: &str,
-) -> PathBuf {
-    let filename = if compress {
-        format!("{}.{}.{}.gz", prefix, enzyme.name, ext)
-    } else {
-        format!("{}.{}.{}", prefix, enzyme.name, ext)
-    };
-    output_dir.join(filename)
-}
-
-/// 构建样品输出路径（使用 .iibsp 后缀）
-fn build_sample_output_path(
-    output_dir: &Path,
-    prefix: &str,
-    enzyme: &Enzyme,
-    compress: bool,
-) -> PathBuf {
-    let filename = if compress {
-        format!("{}.{}.iibsp.gz", prefix, enzyme.name)
-    } else {
-        format!("{}.{}.iibsp", prefix, enzyme.name)
-    };
-    output_dir.join(filename)
 }

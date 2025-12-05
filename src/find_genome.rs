@@ -5,6 +5,7 @@ use fxhash::{FxHashMap, FxHashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use tracing;
 
 /// 根据定性结果筛选定量基因组
 #[derive(Parser, Debug)]
@@ -36,7 +37,7 @@ pub struct FindGenomeArgs {
 
 /// 主函数
 pub fn run(args: FindGenomeArgs) -> Result<()> {
-    println!(
+    tracing::info!(
         "COMMAND: find-genome -l {} -d {} -o {} --qual-dir {} --gscore {} --gcf {}",
         args.sample_list.display(),
         args.database_dir.display(),
@@ -57,7 +58,7 @@ pub fn run(args: FindGenomeArgs) -> Result<()> {
 
     // 加载 GCF 到完整分类信息的映射
     let gcf_to_classify = load_gcf_classify(&classify_file)?;
-    println!("已加载 {} 个基因组分类信息", gcf_to_classify.len());
+    tracing::info!("已加载 {} 个基因组分类信息", gcf_to_classify.len());
 
     // 创建输出目录
     std::fs::create_dir_all(&args.output_dir)
@@ -65,7 +66,7 @@ pub fn run(args: FindGenomeArgs) -> Result<()> {
 
     // 读取样品列表
     let samples = read_sample_list(&args.sample_list)?;
-    println!("共 {} 个样品需要处理", samples.len());
+    tracing::info!("共 {} 个样品需要处理", samples.len());
 
     // 处理每个样品
     for sample_name in samples {
@@ -80,7 +81,7 @@ pub fn run(args: FindGenomeArgs) -> Result<()> {
         )?;
     }
 
-    println!("\n全部完成！");
+    tracing::info!("\n全部完成！");
     Ok(())
 }
 
@@ -188,7 +189,7 @@ fn process_sample(
         }
         
         if found_enzymes.is_empty() {
-            eprintln!(
+            tracing::warn!(
                 "!!! {} 没有定性结果文件（combine.xls 或单个酶结果文件），跳过定量分析",
                 sample_name
             );
@@ -199,11 +200,11 @@ fn process_sample(
     };
     
     if enzymes.is_empty() {
-        eprintln!("警告: {} 未找到使用的酶", sample_name);
+        tracing::warn!("警告: {} 未找到使用的酶", sample_name);
         return Ok(());
     }
 
-    println!("样品 {}: 使用 {} 个酶，{} 个分类通过 G-score 阈值", 
+    tracing::info!("样品 {}: 使用 {} 个酶，{} 个分类通过 G-score 阈值", 
              sample_name, enzymes.len(), pass_gscore_classes.len());
 
     // 创建样品输出目录
@@ -218,7 +219,7 @@ fn process_sample(
         // 检查数据库文件是否存在
         let enzyme_db = database_dir.join(format!("{}.species.fa.gz", enzyme));
         if !enzyme_db.exists() {
-            eprintln!(
+            tracing::warn!(
                 "警告: 数据库文件不存在: {}",
                 enzyme_db.display()
             );
@@ -231,7 +232,7 @@ fn process_sample(
             .join(format!("{}.{}.GCF_detected.xls", sample_name, enzyme));
 
         if !gcf_detected_file.exists() {
-            eprintln!(
+            tracing::warn!(
                 "警告: {} 没有 {} 的 GCF_detected.xls 文件: {}",
                 sample_name,
                 enzyme,
@@ -268,7 +269,7 @@ fn process_sample(
         writeln!(writer, "{}", genome_line)?;
     }
 
-    println!("样品 {}: 筛选出 {} 个基因组", sample_name, genome_count);
+    tracing::info!("样品 {}: 筛选出 {} 个基因组", sample_name, genome_count);
     Ok(())
 }
 

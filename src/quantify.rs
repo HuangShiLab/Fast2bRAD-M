@@ -5,6 +5,7 @@ use needletail::parse_fastx_file;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use tracing;
 
 use crate::enzymes::{enzyme_by_id, enzyme_by_name};
 
@@ -103,7 +104,7 @@ pub fn run(args: QuantifyArgs) -> Result<()> {
     // 验证分类层级
     let tax_level = validate_taxonomy_level(&args.taxonomy_level)?;
 
-    println!(
+    tracing::info!(
         "COMMAND: quantify -l {} -d {} -t {} -s {} -o {} -g {} -v {}",
         args.sample_list.display(),
         args.database_dir.display(),
@@ -134,17 +135,17 @@ pub fn run(args: QuantifyArgs) -> Result<()> {
     }
 
     // 加载数据库
-    println!("### 加载数据库：{}", db_file.display());
+    tracing::info!("### 加载数据库：{}", db_file.display());
     let (tag_to_gcfs, gcf_to_taxonomy, tag_theory_num) =
         load_database(&db_file, &classify_file, &args.taxonomy_level)?;
-    println!("### 数据库加载完成");
+    tracing::info!("### 数据库加载完成");
 
     // 处理样品列表
     let samples = read_sample_list(&args.sample_list)?;
-    println!("共 {} 个样品待处理", samples.len());
+    tracing::info!("共 {} 个样品待处理", samples.len());
 
     for (sample_name, sample_data) in samples {
-        println!("\n### ({}) 样品分析开始", sample_name);
+        tracing::info!("\n### ({}) 样品分析开始", sample_name);
 
         let result = process_sample(
             &sample_name,
@@ -159,12 +160,12 @@ pub fn run(args: QuantifyArgs) -> Result<()> {
         );
 
         match result {
-            Ok(_) => println!("### ({}) 样品分析完成", sample_name),
-            Err(e) => eprintln!("!!! ({}) 错误: {}", sample_name, e),
+            Ok(_) => tracing::info!("### ({}) 样品分析完成", sample_name),
+            Err(e) => tracing::error!("!!! ({}) 错误: {}", sample_name, e),
         }
     }
 
-    println!("\n全部完成！");
+    tracing::info!("\n全部完成！");
     Ok(())
 }
 
@@ -201,7 +202,7 @@ fn read_sample_list(list_path: &Path) -> Result<Vec<(String, PathBuf)>> {
         let sample_path = PathBuf::from(parts[1]);
 
         if !sample_path.exists() {
-            eprintln!(
+            tracing::warn!(
                 "警告: 样品文件不存在: {} ({})",
                 sample_path.display(),
                 sample_name
@@ -389,7 +390,7 @@ fn process_sample(
     }
 
     if tag_num.is_empty() {
-        eprintln!(
+        tracing::warn!(
             "!!! ({}) 警告: {} 级别未检测到任何 2bRAD 标签",
             sample_name,
             enzyme.name
