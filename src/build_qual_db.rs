@@ -9,7 +9,9 @@ use clap::Args;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use fxhash::{FxHashMap, FxHashSet, FxHasher};
+use indicatif::{ProgressBar, ProgressStyle};
 use needletail::parse_fastx_file;
+use tracing;
 
 use crate::enzymes::{Enzyme, enzyme_by_id, enzyme_by_name};
 use crate::io_utils;
@@ -155,23 +157,23 @@ pub fn run(args: BuildQualDbArgs) -> Result<()> {
 
     io_utils::ensure_directory(&args.output_dir)?;
 
-    println!("读取基因组分类列表 ...");
+    tracing::info!("读取基因组分类列表 ...");
     let genomes = read_genome_list(&args.genome_list)?;
-    println!("共 {} 个基因组", genomes.len());
+    tracing::info!("共 {} 个基因组", genomes.len());
 
     // 确定酶切文件（Hash格式）
     let enzyme_file = if let Some(ref file) = args.enzyme_file {
-        println!("使用预酶切文件：{}", file.display());
+        tracing::info!("使用预酶切文件：{}", file.display());
         file.clone()
     } else if let Some(ref dir) = args.pre_digested_dir {
-        println!("从预酶切目录合并文件：{}", dir.display());
+        tracing::info!("从预酶切目录合并文件：{}", dir.display());
         let output_file = args
             .output_dir
             .join(format!("{}.enzyme.fa.gz", enzyme.name));
         merge_pre_digested_files(&genomes, enzyme, dir, &output_file)?;
         output_file
     } else {
-        println!("开始批量酶切基因组并生成 Hash ...");
+        tracing::info!("开始批量酶切基因组并生成 Hash ...");
         let output_file = args
             .output_dir
             .join(format!("{}.enzyme.fa.gz", enzyme.name));
@@ -181,7 +183,7 @@ pub fn run(args: BuildQualDbArgs) -> Result<()> {
 
     // 构建数据库
     for level in &levels {
-        println!("\n========== 构建 {} 级别数据库 (Hash模式) ==========", level.name());
+        tracing::info!("\n========== 构建 {} 级别数据库 (Hash模式) ==========", level.name());
         
         // 修改这里的调用顺序，以匹配新的函数定义
         build_database_for_level(
@@ -194,7 +196,7 @@ pub fn run(args: BuildQualDbArgs) -> Result<()> {
         )?;
     }
 
-    println!("\n全部完成！");
+    tracing::info!("\n全部完成！");
     Ok(())
 }
 
@@ -224,7 +226,7 @@ fn read_genome_list(path: &Path) -> Result<Vec<GenomeRecord>> {
     let mut is_gtdb_format = false;
     let mut first_data_line = true;
 
-    for (line_no, line) in reader.lines().enumerate() {
+    for (_line_no, line) in reader.lines().enumerate() {
         let line = line?;
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
@@ -295,15 +297,21 @@ fn merge_pre_digested_files(
     pre_digested_dir: &Path,
     output_file: &Path,
 ) -> Result<()> {
-    use std::io::{BufRead, BufReader};
-    use flate2::read::GzDecoder;
 
     let file = File::create(output_file)?;
     let mut writer = GzEncoder::new(file, Compression::default());
 
     let total = genomes.len();
-    let mut processed = 0;
     let mut found_count = 0;
+    
+    // 创建进度条
+    let pb = ProgressBar::new(total as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
 
     for genome in genomes {
         // 尝试匹配不同后缀: .iibdb (新版 Extract), .fa.gz (旧版)
@@ -333,16 +341,13 @@ fn merge_pre_digested_files(
         }
         
         if !file_found {
-            eprintln!("警告：未找到基因组 {} 的预酶切文件", genome.gcf_id);
+            tracing::warn!("警告：未找到基因组 {} 的预酶切文件", genome.gcf_id);
         }
 
-        processed += 1;
-        if processed % (total / 20).max(1) == 0 {
-             print!("\r进度: {}/{}", processed, total);
-             std::io::stdout().flush()?;
-        }
+        pb.inc(1);
     }
-    println!("\n合并完成，找到 {}/{}", found_count, total);
+    tracing::info!("合并完成，找到 {}/{}", found_count, total);
+    pb.finish();
     Ok(())
 }
 
@@ -395,12 +400,23 @@ fn digest_genomes(
     let mut writer = GzEncoder::new(file, Compression::default());
 
     let total = genomes.len();
-    for (i, genome) in genomes.iter().enumerate() {
+    
+    // 创建进度条
+    let pb = ProgressBar::new(total as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+    
+    for (_i, genome) in genomes.iter().enumerate() {
         let genome_path = genome.genome_path.as_ref()
             .ok_or_else(|| anyhow!("基因组 {} 缺少路径", genome.gcf_id))?;
 
         if !genome_path.exists() {
-             eprintln!("警告：基因组文件不存在 {}", genome_path.display());
+             tracing::warn!("警告：基因组文件不存在 {}", genome_path.display());
+             pb.inc(1);
              continue;
         }
 
@@ -428,12 +444,9 @@ fn digest_genomes(
             }
         }
 
-        if (i + 1) % 10 == 0 {
-            print!("\r已处理 {}/{}", i + 1, total);
-            std::io::stdout().flush()?;
-        }
+        pb.inc(1);
     }
-    println!();
+    pb.finish_with_message("酶切完成");
     Ok(())
 }
 
@@ -452,7 +465,7 @@ fn build_database_for_level(
 ) -> Result<()> {
     
     // 1. 统计阶段
-    println!("第 1 步：统计标签分类信息 ...");
+    tracing::info!("第 1 步：统计标签分类信息 ...");
 
     let mut gcf_to_taxonomy = FxHashMap::default();
     for genome in genomes {
@@ -476,7 +489,7 @@ fn build_database_for_level(
     )?;
 
     // 2. 输出阶段
-    println!("第 2 步：识别特异性标签并输出数据库 ...");
+    tracing::info!("第 2 步：识别特异性标签并输出数据库 ...");
     output_database(
         genomes,
         enzyme,
@@ -549,12 +562,12 @@ fn collect_tag_taxonomy(
     }
 
     let percent = (processed_gcfs.len() * 100) / genomes.len();
-    println!("  处理了 {}/{} 个基因组 ({}%)", processed_gcfs.len(), genomes.len(), percent);
+    tracing::info!("  处理了 {}/{} 个基因组 ({}%)", processed_gcfs.len(), genomes.len(), percent);
     Ok((tag_taxonomy, genome_tags))
 }
 
 fn output_database(
-    genomes: &[GenomeRecord],
+    _genomes: &[GenomeRecord],
     enzyme: &'static Enzyme,
     enzyme_file: &Path,
     level: TaxonomyLevel,
@@ -622,8 +635,8 @@ fn output_database(
         writeln!(writer, "{}", hash_val)?;
     }
 
-    println!("  输出数据库：{}", output_path.display());
-    println!("  包含 {} 个基因组的特异性标签", unique_counts.len());
+    tracing::info!("  输出数据库：{}", output_path.display());
+    tracing::info!("  包含 {} 个基因组的特异性标签", unique_counts.len());
 
     Ok(())
 }

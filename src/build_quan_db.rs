@@ -3,11 +3,13 @@ use clap::Parser;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use fxhash::{FxHashMap, FxHashSet, FxHasher};
+use indicatif::{ProgressBar, ProgressStyle};
 use needletail::parse_fastx_file;
 use std::fs::File;
 use std::hash::Hasher;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use tracing;
 
 use crate::enzymes::{Enzyme, enzyme_by_id, enzyme_by_name};
 
@@ -144,9 +146,9 @@ pub fn run(args: BuildQuanDbArgs) -> Result<()> {
             .ok_or_else(|| anyhow!("无效的酶名称: {}", args.enzyme_site))?
     };
 
-    println!("读取基因组分类列表 ...");
+    tracing::info!("读取基因组分类列表 ...");
     let (genome_records, _) = read_genome_list(&args.genome_list, &levels)?;
-    println!("共 {} 个基因组", genome_records.len());
+    tracing::info!("共 {} 个基因组", genome_records.len());
 
     std::fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("无法创建输出目录: {}", args.output_dir.display()))?;
@@ -164,7 +166,7 @@ pub fn run(args: BuildQuanDbArgs) -> Result<()> {
 
     // 为每个分类层级构建数据库
     for level in &levels {
-        println!("\n========== 构建 {} 级别数据库 (Hash模式) ==========", level.as_str());
+        tracing::info!("\n========== 构建 {} 级别数据库 (Hash模式) ==========", level.as_str());
         build_database_for_level(
             &intermediate_enzyme_file,
             enzyme,
@@ -175,7 +177,7 @@ pub fn run(args: BuildQuanDbArgs) -> Result<()> {
         )?;
     }
 
-    println!("\n全部完成！");
+    tracing::info!("\n全部完成！");
     Ok(())
 }
 
@@ -218,7 +220,7 @@ fn read_genome_list(
         taxonomy_levels_map.insert(level.as_str().to_string(), *level as usize);
     }
 
-    for (line_no, line) in reader.lines().enumerate() {
+    for (_line_no, line) in reader.lines().enumerate() {
         let line = line?;
         let trimmed_line = line.trim();
         if trimmed_line.is_empty() || trimmed_line.starts_with('#') { continue; }
@@ -292,12 +294,12 @@ fn digest_genomes_to_intermediate_file(
     pre_digested_dir: Option<&PathBuf>,
 ) -> Result<PathBuf> {
     if let Some(existing_file) = enzyme_file {
-        println!("使用预酶切文件: {}", existing_file.display());
+        tracing::info!("使用预酶切文件: {}", existing_file.display());
         return Ok(existing_file.clone());
     }
 
     if let Some(dir) = pre_digested_dir {
-        println!("从预酶切目录合并文件：{}", dir.display());
+        tracing::info!("从预酶切目录合并文件：{}", dir.display());
         let output_file = output_dir.join(format!("{}.enzyme.fa.gz", enzyme.name));
         merge_pre_digested_files(genomes, enzyme, dir, &output_file)?;
         return Ok(output_file);
@@ -316,8 +318,16 @@ fn merge_pre_digested_files(
     let mut writer = GzEncoder::new(file, Compression::default());
 
     let total = genomes.len();
-    let mut processed = 0;
     let mut found = 0;
+    
+    // 创建进度条
+    let pb = ProgressBar::new(total as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
 
     for genome in genomes {
         let genome_id = genome.gcf_id.split('.').take(2).collect::<Vec<_>>().join(".");
@@ -342,17 +352,14 @@ fn merge_pre_digested_files(
         }
         
         if !file_found {
-            eprintln!("警告：未找到基因组 {} 的预酶切文件", genome.gcf_id);
+            tracing::warn!("警告：未找到基因组 {} 的预酶切文件", genome.gcf_id);
         }
 
-        processed += 1;
-        if processed % (total / 20).max(1) == 0 {
-            print!("\r进度: {}/{}", processed, total);
-            std::io::stdout().flush()?;
-        }
+        pb.inc(1);
     }
 
-    println!("\n合并完成：{}/{} 个基因组", found, total);
+    tracing::info!("合并完成：{}/{} 个基因组", found, total);
+    pb.finish();
     Ok(())
 }
 
@@ -377,7 +384,7 @@ fn process_and_write_file(
         let mut pos = "0";
         let mut tag_index = "0";
 
-        if let Some(parts) = header_str.split_once('|') {
+        if let Some(_parts) = header_str.split_once('|') {
              // 已经是标准格式 >GCF|index|scaffold|...
              // 只需提取需要的信息，或者如果已经是目标格式，我们可能不需要做太多
              // 但为了统一，我们重新组装
@@ -435,19 +442,19 @@ fn build_database_for_level(
     genomes: &[GenomeRecord],
     remove_redundant: bool,
 ) -> Result<()> {
-    println!("第 1 步：统计标签分类信息 ...");
+    tracing::info!("第 1 步：统计标签分类信息 ...");
 
     let mut gcf_to_taxonomy = FxHashMap::default();
     
     // Debug: 打印前 3 个基因组的分类字符串，检查是否符合预期
-    println!("  [DEBUG] 检查分类字符串格式 (Level={}, Index 0..{}):", level.as_str(), level as usize);
+    tracing::debug!("  [DEBUG] 检查分类字符串格式 (Level={}, Index 0..{}):", level.as_str(), level as usize);
     
-    for (i, genome) in genomes.iter().enumerate() {
+    for (_i, genome) in genomes.iter().enumerate() {
         // [FIX]: 使用 0..level 确保只取到 Species，不含 Strain
         let end_index = std::cmp::min(level as usize, genome.taxonomy.len());
         let taxonomy_str = genome.taxonomy[0..end_index].join("\t");
         
-        println!("  [DEBUG] GCF: {} -> Tax: '{}'", genome.gcf_id, taxonomy_str);
+        tracing::debug!("  [DEBUG] GCF: {} -> Tax: '{}'", genome.gcf_id, taxonomy_str);
 
         gcf_to_taxonomy.insert(genome.gcf_id.clone(), taxonomy_str);
     }
@@ -460,7 +467,7 @@ fn build_database_for_level(
         remove_redundant,
     )?;
 
-    println!("第 2 步：识别特异性标签并输出数据库 ...");
+    tracing::info!("第 2 步：识别特异性标签并输出数据库 ...");
     identify_and_output_unique_tags(
         enzyme_file,
         enzyme,
@@ -513,7 +520,7 @@ fn collect_tag_taxonomies(
         
         // [DEBUG]: 打印前几个 Hash 字符串，确认是否真的是数字
         if total_records < 5 {
-             println!("  [DEBUG] 读取Hash行: '{}'", hash_str.trim());
+             tracing::debug!("  [DEBUG] 读取Hash行: '{}'", hash_str.trim());
         }
 
         let hash_val: Hash = match hash_str.trim().parse() {
@@ -524,7 +531,7 @@ fn collect_tag_taxonomies(
             Err(_) => {
                 // [DEBUG]: 如果解析失败，打印出来看看是什么怪东西
                 if total_records < 10 {
-                    println!("  [WARN] Hash解析失败: '{}' 不是有效的 u64", hash_str.trim());
+                    tracing::warn!("  [WARN] Hash解析失败: '{}' 不是有效的 u64", hash_str.trim());
                 }
                 continue; 
             },
@@ -545,15 +552,15 @@ fn collect_tag_taxonomies(
     }
 
     let percent = (processed_gcfs.len() * 100) / genomes.len();
-    println!("  [DEBUG] 文件读取统计: 总记录={}, 有效Hash={}, 覆盖基因组={}/{} ({}%)", 
+    tracing::debug!("  [DEBUG] 文件读取统计: 总记录={}, 有效Hash={}, 覆盖基因组={}/{} ({}%)", 
         total_records, valid_hash_records, processed_gcfs.len(), genomes.len(), percent);
-    println!("  [DEBUG] Map中唯一的Tag(Hash)总数: {}", tag_taxonomy.len());
+    tracing::debug!("  [DEBUG] Map中唯一的Tag(Hash)总数: {}", tag_taxonomy.len());
 
     // [DEBUG] 随机抽查一个 Tag 看看它的分类情况
     if let Some((hash, taxa)) = tag_taxonomy.iter().next() {
-        println!("  [DEBUG] 抽查 Tag {}: 对应 {} 个分类字符串", hash, taxa.len());
+        tracing::debug!("  [DEBUG] 抽查 Tag {}: 对应 {} 个分类字符串", hash, taxa.len());
         for t in taxa {
-            println!("      -> '{}'", t);
+            tracing::debug!("      -> '{}'", t);
         }
     }
 
@@ -639,10 +646,10 @@ fn identify_and_output_unique_tags(
 
     drop(writer);
 
-    println!("  [DEBUG] 筛选统计: 接受={}, 拒绝(未找到)={}, 拒绝(分类模糊/多物种)={}, 拒绝(基因组冗余)={}", 
+    tracing::debug!("  [DEBUG] 筛选统计: 接受={}, 拒绝(未找到)={}, 拒绝(分类模糊/多物种)={}, 拒绝(基因组冗余)={}", 
         accepted, rejected_not_found, rejected_ambiguous, rejected_redundant);
-    println!("  输出数据库：{}", output_path.display());
-    println!("  包含 {} 个基因组的特异性标签", unique_counts.len());
+    tracing::info!("  输出数据库：{}", output_path.display());
+    tracing::info!("  包含 {} 个基因组的特异性标签", unique_counts.len());
 
     Ok(())
 }

@@ -4,6 +4,7 @@ use fxhash::FxHashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use tracing;
 
 /// 合并多样品丰度表
 #[derive(Parser, Debug)]
@@ -37,7 +38,7 @@ struct TaxonAbundance {
 }
 
 pub fn run(args: MergeArgs) -> Result<()> {
-    println!(
+    tracing::info!(
         "COMMAND: merge -l {} -o {} -p {}",
         args.sample_list.display(),
         args.output_dir.display(),
@@ -68,12 +69,12 @@ pub fn run(args: MergeArgs) -> Result<()> {
         bail!("未找到有效的样品丰度文件");
     }
 
-    println!("共读取 {} 个样品", sample_order.len());
+    tracing::info!("共读取 {} 个样品", sample_order.len());
 
     // 输出合并后的丰度表（all.xls）
     let all_output = args.output_dir.join(format!("{}.all.xls", args.prefix));
     write_merged_table(&all_output, &taxa_abundance, &sample_order, &header)?;
-    println!("✅ 合并表已输出：{}", all_output.display());
+    tracing::info!("✅ 合并表已输出：{}", all_output.display());
 
     // 输出过滤后的丰度表（filtered.xls）
     let filtered_output = args.output_dir.join(format!("{}.filtered.xls", args.prefix));
@@ -85,9 +86,9 @@ pub fn run(args: MergeArgs) -> Result<()> {
         &mock_set,
         &control_set,
     )?;
-    println!("✅ 过滤表已输出：{}", filtered_output.display());
+    tracing::info!("✅ 过滤表已输出：{}", filtered_output.display());
 
-    println!("\n全部完成！");
+    tracing::info!("\n全部完成！");
     Ok(())
 }
 
@@ -122,7 +123,7 @@ fn read_all_profiles(
         let profile_path = Path::new(parts[1]);
 
         if !profile_path.exists() {
-            eprintln!("警告：样品 {} 的丰度文件不存在：{}", sample_name, profile_path.display());
+            tracing::warn!("警告：样品 {} 的丰度文件不存在：{}", sample_name, profile_path.display());
             continue;
         }
 
@@ -265,7 +266,7 @@ fn write_filtered_table(
         .collect();
 
     if filtered_samples.is_empty() {
-        eprintln!("警告：过滤后没有剩余样品");
+        tracing::warn!("警告：过滤后没有剩余样品");
         // 创建空文件
         return Ok(());
     }

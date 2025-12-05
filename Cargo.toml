@@ -8,5 +8,8 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 flate2 = "1.1.5"
 fxhash = "0.2.1"
+indicatif = "0.17"
 needletail = "0.6"
 rayon = "1.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "std"] }

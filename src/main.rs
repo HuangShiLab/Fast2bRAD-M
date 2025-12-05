@@ -11,6 +11,7 @@ mod types;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use tracing_subscriber;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -45,6 +46,13 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
+    // 初始化 tracing 日志系统（非阻塞）
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .init();
+    
     let cli = Cli::parse();
     match cli.command {
         Commands::Extract(args) => extract::run(args),

@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tracing;
 
 use crate::build_qual_db;
 use crate::build_quan_db;
@@ -136,7 +137,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
     // Step 1: extract（batch, type=2）
     if args.mode != "db-only" {
         let step1_num = if args.mode == "sample-only" { "1/5" } else { "1/4" };
-        println!("\n===== [{}] 提取样品标签 (extract) =====", step1_num);
+        tracing::info!("\n===== [{}] 提取样品标签 (extract) =====", step1_num);
         let extract_done_marker = d01.join(".done");
         if !resume || !extract_done_marker.exists() {
             let ext_args = extract::ExtractArgs {
@@ -158,14 +159,14 @@ pub fn run(args: PipelineArgs) -> Result<()> {
             extract::run(ext_args).context("extract 阶段失败")?;
             std::fs::write(&extract_done_marker, b"ok")?;
         } else {
-            println!("resume=on: 跳过 extract（已存在）");
+            tracing::info!("resume=on: 跳过 extract（已存在）");
         }
     }
 
     // Step 2: 构建数据库（可选）
     let db_dir_in_use = if args.mode != "sample-only" {
         if let Some(gl) = args.genome_list.as_ref() {
-            println!("\n===== [2/4] 构建数据库 (build-qual-db / build-quan-db) =====");
+            tracing::info!("\n===== [2/4] 构建数据库 (build-qual-db / build-quan-db) =====");
             std::fs::create_dir_all(&d02)?;
             std::fs::create_dir_all(&d03)?;
 
@@ -184,7 +185,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
                 build_qual_db::run(qual_args).context("build-qual-db 阶段失败")?;
                 std::fs::write(&qual_done_marker, b"ok")?;
             } else {
-                println!("resume=on: 跳过 build-qual-db（已存在）");
+                tracing::info!("resume=on: 跳过 build-qual-db（已存在）");
             }
 
             // build-quan-db（使用 02_db_qual 中已生成的 enzyme.fa.gz，避免重复生成）
@@ -208,7 +209,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
                 build_quan_db::run(quan_args).context("build-quan-db 阶段失败")?;
                 std::fs::write(&quan_done_marker, b"ok")?;
             } else {
-                println!("resume=on: 跳过 build-quan-db（已存在）");
+                tracing::info!("resume=on: 跳过 build-quan-db（已存在）");
             }
 
             d03.clone()
@@ -230,7 +231,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
         if !classify_path.exists() {
             if let Some(gl) = args.genome_list.as_ref() {
                 if is_gtdb_list(gl).unwrap_or(false) {
-                    println!("分类文件缺失，检测到 GTDB 清单，尝试自动生成 ...");
+                    tracing::info!("分类文件缺失，检测到 GTDB 清单，尝试自动生成 ...");
                     ensure_convert_tool_and_run(gl, &qual_db)
                         .context("自动生成分类文件失败")?;
                 }
@@ -238,7 +239,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
         }
         
         // Step 2a: 定性分析（使用 02_db_qual）
-        println!("\n===== [2a/5] 定性分析 (qualitative) =====");
+        tracing::info!("\n===== [2a/5] 定性分析 (qualitative) =====");
         let qual_done_marker = d_qual.join(".done");
         if !resume || !qual_done_marker.exists() {
             let sample_list_for_qual = d_qual.join(format!("{}.samples.tsv", args.prefix));
@@ -256,11 +257,11 @@ pub fn run(args: PipelineArgs) -> Result<()> {
             quantify::run(q_args).context("定性分析阶段失败")?;
             std::fs::write(&qual_done_marker, b"ok")?;
         } else {
-            println!("resume=on: 跳过定性分析（已存在）");
+            tracing::info!("resume=on: 跳过定性分析（已存在）");
         }
 
         // Step 2b: find-genome（根据定性结果筛选基因组）
-        println!("\n===== [2b/5] 筛选基因组 (find-genome) =====");
+        tracing::info!("\n===== [2b/5] 筛选基因组 (find-genome) =====");
         let find_genome_done_marker = d_sdb.join(".done");
         if !resume || !find_genome_done_marker.exists() {
             let fg_args = find_genome::FindGenomeArgs {
@@ -274,11 +275,11 @@ pub fn run(args: PipelineArgs) -> Result<()> {
             find_genome::run(fg_args).context("find-genome 阶段失败")?;
             std::fs::write(&find_genome_done_marker, b"ok")?;
         } else {
-            println!("resume=on: 跳过 find-genome（已存在）");
+            tracing::info!("resume=on: 跳过 find-genome（已存在）");
         }
 
         // Step 2c: 为每个样品构建特异性定量数据库
-        println!("\n===== [2c/5] 构建样品特异性定量数据库 =====");
+        tracing::info!("\n===== [2c/5] 构建样品特异性定量数据库 =====");
         let samples = read_sample_names(&args.samples)?;
         let enzyme_file = qual_db.join(format!("{}.{}.fa.gz", get_enzyme_name(&args.site)?, args.level));
         if !enzyme_file.exists() {
@@ -288,14 +289,14 @@ pub fn run(args: PipelineArgs) -> Result<()> {
         for sample_name in &samples {
             let sample_sdb_list = d_sdb.join(sample_name).join("sdb.list");
             if !sample_sdb_list.exists() {
-                eprintln!("警告: 样品 {} 没有 sdb.list，跳过构建定量数据库", sample_name);
+                tracing::warn!("警告: 样品 {} 没有 sdb.list，跳过构建定量数据库", sample_name);
                 continue;
             }
 
             let sample_db_dir = d_sdb.join(sample_name).join("database");
             let sample_db_done = sample_db_dir.join(".done");
             if resume && sample_db_done.exists() {
-                println!("resume=on: 跳过样品 {} 的定量数据库构建（已存在）", sample_name);
+                tracing::info!("resume=on: 跳过样品 {} 的定量数据库构建（已存在）", sample_name);
                 continue;
             }
 
@@ -336,7 +337,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
     if !classify_path.exists() {
         if let Some(gl) = args.genome_list.as_ref() {
             if is_gtdb_list(gl).unwrap_or(false) {
-                println!("分类文件缺失，检测到 GTDB 清单，尝试自动生成 ...");
+                tracing::info!("分类文件缺失，检测到 GTDB 清单，尝试自动生成 ...");
                 ensure_convert_tool_and_run(gl, &db_dir_in_use)
                     .context("自动生成分类文件失败")?;
             }
@@ -347,12 +348,12 @@ pub fn run(args: PipelineArgs) -> Result<()> {
     if args.mode != "db-only" {
         if args.mode == "sample-only" {
             // sample-only 模式：为每个样品使用其特异性定量数据库
-            println!("\n===== [3/5] 定量分析 (quantify) =====");
+            tracing::info!("\n===== [3/5] 定量分析 (quantify) =====");
             let samples = read_sample_names(&args.samples)?;
             for sample_name in &samples {
                 let sample_db_dir = d_sdb.join(sample_name).join("database");
                 if !sample_db_dir.exists() {
-                    eprintln!("警告: 样品 {} 没有定量数据库，跳过定量分析", sample_name);
+                    tracing::warn!("警告: 样品 {} 没有定量数据库，跳过定量分析", sample_name);
                     continue;
                 }
 
@@ -360,7 +361,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
                 std::fs::create_dir_all(&sample_quant_dir)?;
                 let sample_quant_done = sample_quant_dir.join(".done");
                 if resume && sample_quant_done.exists() {
-                    println!("resume=on: 跳过样品 {} 的定量分析（已存在）", sample_name);
+                    tracing::info!("resume=on: 跳过样品 {} 的定量分析（已存在）", sample_name);
                     continue;
                 }
 
@@ -368,7 +369,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
                 let sample_list_file = sample_quant_dir.join(format!("{}.list.tsv", sample_name));
                 let sample_iibsp = d01.join(format!("{}.{}.iibsp", sample_name, get_enzyme_name(&args.site)?));
                 if !sample_iibsp.exists() {
-                    eprintln!("警告: 样品 {} 的提取产物不存在，跳过", sample_name);
+                    tracing::warn!("警告: 样品 {} 的提取产物不存在，跳过", sample_name);
                     continue;
                 }
                 std::fs::write(&sample_list_file, format!("{}\t{}", sample_name, sample_iibsp.display()))?;
@@ -388,7 +389,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
             }
         } else {
             // full 模式：使用全局数据库
-            println!("\n===== [3/4] 丰度分析 (quantify) =====");
+            tracing::info!("\n===== [3/4] 丰度分析 (quantify) =====");
             let quant_done_marker = d04.join(".done");
             if !resume || !quant_done_marker.exists() {
                 let sample_list_for_quant = d04.join(format!("{}.samples.tsv", args.prefix));
@@ -406,7 +407,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
                 quantify::run(q_args).context("quantify 阶段失败")?;
                 std::fs::write(&quant_done_marker, b"ok")?;
             } else {
-                println!("resume=on: 跳过 quantify（已存在）");
+                tracing::info!("resume=on: 跳过 quantify（已存在）");
             }
         }
     }
@@ -414,7 +415,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
     // Step 4: merge
     if args.mode != "db-only" {
         let step_num = if args.mode == "sample-only" { "4/5" } else { "4/4" };
-        println!("\n===== [{}] 合并结果 (merge) =====", step_num);
+        tracing::info!("\n===== [{}] 合并结果 (merge) =====", step_num);
         let merge_done_marker = d05.join(".done");
         if !resume || !merge_done_marker.exists() {
             let list_path = d05.join(format!("{}.merge_list.tsv", args.prefix));
@@ -435,11 +436,11 @@ pub fn run(args: PipelineArgs) -> Result<()> {
             merge::run(m_args).context("merge 阶段失败")?;
             std::fs::write(&merge_done_marker, b"ok")?;
         } else {
-            println!("resume=on: 跳过 merge（已存在）");
+            tracing::info!("resume=on: 跳过 merge（已存在）");
         }
     }
 
-    println!("\n流水线完成：{}", args.outdir.display());
+    tracing::info!("\n流水线完成：{}", args.outdir.display());
     Ok(())
 }
 
@@ -499,7 +500,7 @@ fn ensure_convert_tool_and_run(gtdb_list: &Path, db_dir: &Path) -> Result<()> {
     if !out.exists() {
         bail!("转换后未找到输出文件：{}", out.display());
     }
-    println!("已自动生成分类文件：{}", out.display());
+    tracing::info!("已自动生成分类文件：{}", out.display());
     Ok(())
 }
 
@@ -584,7 +585,6 @@ fn build_merge_list_from_sample_quantify(quant_dir: &Path, output_list: &Path) -
         }
         let sample = entry.file_name().to_string_lossy().to_string();
         // 递归查找样品目录中的 {sample}.{enzyme}.xls 文件（排除 GCF_detected.xls）
-        let mut found_xls = None;
         
         // 递归查找函数
         fn find_xls_recursive(dir: &Path, sample: &str) -> Option<PathBuf> {
@@ -611,7 +611,7 @@ fn build_merge_list_from_sample_quantify(quant_dir: &Path, output_list: &Path) -
             None
         }
         
-        found_xls = find_xls_recursive(&entry.path(), &sample);
+        let found_xls = find_xls_recursive(&entry.path(), &sample);
         
         if let Some(xls_path) = found_xls {
             entries.push((sample, xls_path));

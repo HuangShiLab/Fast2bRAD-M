@@ -8,9 +8,11 @@ use std::hash::Hasher;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
+use indicatif::{ProgressBar, ProgressStyle};
 use needletail::parse_fastx_file;
 use rayon::prelude::*;
 use fxhash::FxHasher;
+use tracing;
 
 use crate::enzymes::{Enzyme, enzyme_by_id, enzyme_by_name};
 use crate::io_utils;
@@ -160,7 +162,7 @@ fn run_single_sample(args: ExtractArgs) -> Result<()> {
 }
 
 fn run_batch_mode(base_args: ExtractArgs, batch_file: &Path) -> Result<()> {
-    println!("### 批量处理模式：{}", batch_file.display());
+    tracing::info!("### 批量处理模式：{}", batch_file.display());
     
     let file = File::open(batch_file)
         .with_context(|| format!("无法打开批量文件：{}", batch_file.display()))?;
@@ -174,7 +176,7 @@ fn run_batch_mode(base_args: ExtractArgs, batch_file: &Path) -> Result<()> {
         
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 2 {
-            eprintln!("Warning: Skipping invalid line {}: {}", line_num + 1, line);
+            tracing::warn!("Warning: Skipping invalid line {}: {}", line_num + 1, line);
             continue;
         }
         
@@ -194,7 +196,16 @@ fn run_batch_mode(base_args: ExtractArgs, batch_file: &Path) -> Result<()> {
 
     let completed = Arc::new(AtomicUsize::new(0));
     let total = samples.len();
-    eprintln!("DEBUG: 开始并行处理 {} 个样本", total);
+    tracing::debug!("开始并行处理 {} 个样本", total);
+
+    // 创建进度条
+    let pb = ProgressBar::new(total as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
 
     samples.into_par_iter().for_each(|(sample_name, input1, input2)| {
         let mut sample_args = base_args.clone();
@@ -213,19 +224,22 @@ fn run_batch_mode(base_args: ExtractArgs, batch_file: &Path) -> Result<()> {
             sample_args.output_prefix = vec![sample_name.clone()];
         }
 
-        eprintln!("DEBUG: 线程启动处理样本: {}", sample_name);
+        tracing::debug!("线程启动处理样本: {}", sample_name);
 
         match run_single_sample(sample_args) {
             Ok(_) => {
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                println!("✅ [{}/{}] 样品 {} 处理完成", count, total, sample_name);
+                pb.inc(1);
+                tracing::info!("✅ [{}/{}] 样品 {} 处理完成", count, total, sample_name);
             }
             Err(e) => {
-                eprintln!("❌ 样品 {} 处理失败: {:?}", sample_name, e);
+                pb.inc(1);
+                tracing::error!("❌ 样品 {} 处理失败: {:?}", sample_name, e);
             }
         }
     });
     
+    pb.finish_with_message("批量处理完成");
     Ok(())
 }
 
@@ -248,7 +262,7 @@ fn extract_reference_genome(
     let input_path = &args.input[0];
     let output_prefix = &args.output_prefix[0];
 
-    println!("数字酶切参考基因组 (Hash模式)：{}", input_path.display());
+    tracing::info!("数字酶切参考基因组 (Hash模式)：{}", input_path.display());
 
     // 生成 .iibdb 文件 (文本格式)
     let output_filename = format!("{}.{}.iibdb", output_prefix, enzyme.name);
@@ -305,7 +319,7 @@ fn extract_reference_genome(
     };
     io_utils::write_sample_stats(&stat_path, &stats)?;
 
-    println!("完成：生成 iibdb 文件 {}，含 {} 个序列，{} 个标签", output_path.display(), input_sequences, total_tags);
+    tracing::info!("完成：生成 iibdb 文件 {}，含 {} 个序列，{} 个标签", output_path.display(), input_sequences, total_tags);
     Ok(())
 }
 
@@ -325,7 +339,7 @@ fn extract_shotgun(
     let input_path = merged_path.as_ref().unwrap_or(&args.input[0]);
     let output_prefix = &args.output_prefix[0];
 
-    println!("提取 shotgun 标签 (Hash模式)：{}", input_path.display());
+    tracing::info!("提取 shotgun 标签 (Hash模式)：{}", input_path.display());
 
     // 生成 .iibsp 文件 (文本格式)
     let output_filename = format!("{}.{}.iibsp", output_prefix, enzyme.name);
@@ -374,7 +388,7 @@ fn extract_shotgun(
     };
     io_utils::write_sample_stats(&stat_path, &stats)?;
 
-    println!("完成：生成 iibsp 文件，提取 {} 个标签", tag_count);
+    tracing::info!("完成：生成 iibsp 文件，提取 {} 个标签", tag_count);
     Ok(())
 }
 
@@ -440,7 +454,7 @@ fn extract_single_tag(
     let input_path = &args.input[0];
     let output_prefix = &args.output_prefix[0];
 
-    println!("提取单 2bRAD 标签 (Hash模式)：{}", input_path.display());
+    tracing::info!("提取单 2bRAD 标签 (Hash模式)：{}", input_path.display());
 
     let output_filename = format!("{}.{}.iibsp", output_prefix, enzyme.name);
     let output_path = args.output_dir.join(output_filename);
@@ -516,7 +530,7 @@ fn extract_single_tag(
     let percent = if input_sequences > 0 { (qc_passed as f64 / input_sequences as f64) * 100.0 } else { 0.0 };
     writeln!(stat_file, "{}\t{}\t{}\t{}\t{}\t{:.2}%", output_prefix, enzyme.name, input_sequences, enzyme_reads, qc_passed, percent)?;
 
-    println!("完成：输入 {} 个序列，命中 {} 个，质控通过 {} 个 ({:.2}%)", input_sequences, enzyme_reads, qc_passed, percent);
+    tracing::info!("完成：输入 {} 个序列，命中 {} 个，质控通过 {} 个 ({:.2}%)", input_sequences, enzyme_reads, qc_passed, percent);
     Ok(())
 }
 
@@ -535,7 +549,7 @@ fn extract_concatenated_tags(
     }
 
     let r1_path = &args.input[0];
-    println!("处理 5 连标签数据 (Hash模式)：R1={}", r1_path.display());
+    tracing::info!("处理 5 连标签数据 (Hash模式)：R1={}", r1_path.display());
     let input_path = r1_path;
 
     // 预先打开 5 个输出文件 writers
@@ -632,7 +646,7 @@ fn extract_concatenated_tags(
         writeln!(stat_file, "{}\t{}\t{}\t{}\t{}\t{}\t{:.2}%", prefix, enzyme.name, raw_reads_count, combined_reads, enzyme_reads[i], qc_passed[i], percent)?;
     }
 
-    println!("完成：原始 {} reads，拼接后 {} reads，5 个样本分别通过质控：{:?}", raw_reads_count, combined_reads, qc_passed);
+    tracing::info!("完成：原始 {} reads，拼接后 {} reads，5 个样本分别通过质控：{:?}", raw_reads_count, combined_reads, qc_passed);
 
     Ok(())
 }
