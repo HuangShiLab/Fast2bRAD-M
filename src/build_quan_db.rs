@@ -1,20 +1,61 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Context, Result, anyhow};
 use clap::Parser;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use fxhash::{FxHashMap, FxHashSet};
+use fxhash::{FxHashMap, FxHashSet, FxHasher};
 use needletail::parse_fastx_file;
 use std::fs::File;
+use std::hash::Hasher;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use crate::enzymes::{Enzyme, enzyme_by_id, enzyme_by_name};
 
+// ================== Hash 工具与类型定义 ==================
+
+pub type Hash = u64;
+
+// 计算 FxHash
+pub fn hash_bytes(bytes: &[u8]) -> Hash {
+    let mut hasher = FxHasher::default();
+    hasher.write(bytes);
+    hasher.finish()
+}
+
+// 计算反向互补
+fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+    let mut rc = Vec::with_capacity(seq.len());
+    for &b in seq.iter().rev() {
+        let complement = match b {
+            b'A' | b'a' => b'T',
+            b'T' | b't' => b'A',
+            b'C' | b'c' => b'G',
+            b'G' | b'g' => b'C',
+            b'N' | b'n' => b'N',
+            x => x, 
+        };
+        rc.push(complement);
+    }
+    rc
+}
+
+// 获取 Canonical 序列（用于去重和哈希）
+// 逻辑：严格比较序列与其反向互补，取较小者，确保正反链生成同一个 Hash
+fn get_canonical_sequence(seq: &[u8]) -> Vec<u8> {
+    let rc = reverse_complement(seq);
+    if seq <= rc.as_slice() {
+        seq.to_vec()
+    } else {
+        rc
+    }
+}
+
+// ================== 参数与结构体 ==================
+
 /// 构建定量数据库参数
 #[derive(Parser, Debug)]
 pub struct BuildQuanDbArgs {
     /// 基因组分类列表文件（TSV格式）
-    /// 支持传统格式（9列）或 GTDB 格式（3列：accession, gtdb_taxonomy, ncbi_taxonomy）
     #[arg(short = 'l', long = "list")]
     pub genome_list: PathBuf,
 
@@ -34,7 +75,7 @@ pub struct BuildQuanDbArgs {
     #[arg(short = 'e', long = "enzyme-file")]
     pub enzyme_file: Option<PathBuf>,
 
-    /// 可选：预酶切目录（extract 批量输出目录，包含 genome*.fa.gz 文件）
+    /// 可选：预酶切目录（extract 批量输出目录）
     #[arg(long = "pre-digested-dir")]
     pub pre_digested_dir: Option<PathBuf>,
 
@@ -88,35 +129,31 @@ impl TaxonomyLevel {
 /// 基因组记录
 struct GenomeRecord {
     gcf_id: String,
-    taxonomy: Vec<String>, // 完整分类信息
+    taxonomy: Vec<String>, 
 }
 
 /// 主函数
 pub fn run(args: BuildQuanDbArgs) -> Result<()> {
-    // 解析分类层级
     let levels = parse_taxonomy_levels(&args.taxonomy_levels)?;
 
-    // 获取酶
     let enzyme = if let Ok(site_num) = args.enzyme_site.parse::<u8>() {
         enzyme_by_id(site_num)
-            .ok_or_else(|| anyhow::anyhow!("无效的酶切位点编号: {}", args.enzyme_site))?
+            .ok_or_else(|| anyhow!("无效的酶切位点编号: {}", args.enzyme_site))?
     } else {
         enzyme_by_name(&args.enzyme_site)
-            .ok_or_else(|| anyhow::anyhow!("无效的酶名称: {}", args.enzyme_site))?
+            .ok_or_else(|| anyhow!("无效的酶名称: {}", args.enzyme_site))?
     };
 
     println!("读取基因组分类列表 ...");
     let (genome_records, _) = read_genome_list(&args.genome_list, &levels)?;
     println!("共 {} 个基因组", genome_records.len());
 
-    // 创建输出目录
     std::fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("无法创建输出目录: {}", args.output_dir.display()))?;
 
-    // 判断是否去冗余
     let remove_redundant = args.remove_redundant.to_lowercase() == "yes";
 
-    // 酶切基因组或读取预酶切文件/目录
+    // 酶切基因组或合并预酶切文件（转换为 Hash 格式）
     let intermediate_enzyme_file = digest_genomes_to_intermediate_file(
         &genome_records,
         enzyme,
@@ -127,10 +164,7 @@ pub fn run(args: BuildQuanDbArgs) -> Result<()> {
 
     // 为每个分类层级构建数据库
     for level in &levels {
-        println!(
-            "\n========== 构建 {} 级别数据库 ==========",
-            level.as_str()
-        );
+        println!("\n========== 构建 {} 级别数据库 (Hash模式) ==========", level.as_str());
         build_database_for_level(
             &intermediate_enzyme_file,
             enzyme,
@@ -145,7 +179,6 @@ pub fn run(args: BuildQuanDbArgs) -> Result<()> {
     Ok(())
 }
 
-/// 解析分类层级
 fn parse_taxonomy_levels(levels_str: &str) -> Result<Vec<TaxonomyLevel>> {
     if levels_str == "all" {
         Ok(vec![
@@ -166,10 +199,6 @@ fn parse_taxonomy_levels(levels_str: &str) -> Result<Vec<TaxonomyLevel>> {
     }
 }
 
-/// 读取基因组分类列表
-/// 支持两种格式：
-/// 1. 传统格式：GCF_ID  Kingdom  Phylum  Class  Order  Family  Genus  Species  Strain  [genome_path]
-/// 2. GTDB 格式：accession  gtdb_taxonomy  ncbi_taxonomy （使用 gtdb_taxonomy 列）
 fn read_genome_list(
     list_path: &Path,
     levels: &[TaxonomyLevel],
@@ -190,113 +219,71 @@ fn read_genome_list(
     }
 
     for (line_no, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| format!("读取第 {} 行失败", line_no + 1))?;
-        let trimmed = line.trim();
+        let line = line?;
+        let trimmed_line = line.trim();
+        if trimmed_line.is_empty() || trimmed_line.starts_with('#') { continue; }
 
-        // 跳过注释和空行
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        let parts: Vec<&str> = trimmed.split('\t').collect();
+        let parts: Vec<&str> = trimmed_line.split('\t').collect();
         
-        // 自动检测格式（第一行数据）
         if first_data_line {
             first_data_line = false;
-            // 检测 GTDB 格式：第二列包含 "d__" 或列名为 "gtdb_taxonomy"
+            // 简单的 GTDB 检测
             if parts.len() >= 2 && (parts[1].contains("d__") || parts[1] == "gtdb_taxonomy") {
                 is_gtdb_format = true;
-                println!("检测到 GTDB 分类格式");
-                // 如果是表头，跳过
-                if parts[0] == "accession" || parts[0] == "GCF_ID" {
-                    continue;
-                }
-            } else {
-                println!("检测到传统分类格式");
+                if parts[0] == "accession" || parts[0] == "GCF_ID" { continue; }
             }
         }
 
         if is_gtdb_format {
-            // GTDB 格式：accession  gtdb_taxonomy  [ncbi_taxonomy]
-            if parts.len() < 2 {
-                continue;
-            }
-
-            let gcf_id = extract_gcf_id(parts[0]);
-            let taxonomy = parse_gtdb_taxonomy(parts[1])?;
-
-            genomes.push(GenomeRecord { gcf_id, taxonomy });
+            if parts.len() < 2 { continue; }
+            genomes.push(GenomeRecord { 
+                gcf_id: extract_gcf_id(parts[0].trim()), // Trim ID
+                taxonomy: parse_gtdb_taxonomy(parts[1])? 
+            });
         } else {
-            // 传统格式
-            if parts.len() < 2 {
-                continue;
-            }
-
-            let gcf_id = parts[0].to_string();
-            let taxonomy = parts.iter().map(|s| s.to_string()).collect();
-
-            genomes.push(GenomeRecord { gcf_id, taxonomy });
+            // 传统格式：GCF, Kingdom, Phylum ...
+            if parts.len() < 2 { continue; }
+            genomes.push(GenomeRecord { 
+                gcf_id: parts[0].trim().to_string(), // Trim ID
+                // [FIX]: 跳过 ID (index 0)，从 index 1 开始
+                // [FIX]: 增加 .trim() 确保没有隐形空格导致分类不匹配
+                taxonomy: parts[1..].iter().map(|s| s.trim().to_string()).collect() 
+            });
         }
     }
-
+    
     Ok((genomes, taxonomy_levels_map))
 }
 
-/// 从文件名提取 GCF/GCA ID
 fn extract_gcf_id(filename: &str) -> String {
     let name = filename.split('/').last().unwrap_or(filename);
-    
-    // 移除 _genomic 及后面的部分
-    let name_clean = if let Some(pos) = name.find("_genomic") {
-        &name[..pos]
-    } else {
-        name
-    };
-    
-    // 如果是 GCF/GCA 格式，返回 GCF_XXXXXX.X 格式
+    let name_clean = if let Some(pos) = name.find("_genomic") { &name[..pos] } else { name };
     if name_clean.starts_with("GCF_") || name_clean.starts_with("GCA_") {
         let parts: Vec<&str> = name_clean.split('_').collect();
-        if parts.len() >= 2 {
-            // 返回 GCA_000477855.1 格式（不包含后面的描述）
-            return format!("{}_{}", parts[0], parts[1]);
-        }
+        if parts.len() >= 2 { return format!("{}_{}", parts[0], parts[1]); }
     }
-    
     name_clean.to_string()
 }
 
-/// 解析 GTDB 分类字符串
 fn parse_gtdb_taxonomy(gtdb_str: &str) -> Result<Vec<String>> {
     let parts: Vec<&str> = gtdb_str.split(';').collect();
-    if parts.len() < 7 {
-        bail!("GTDB 分类格式错误，需要至少 7 个层级（d__ 到 s__）");
-    }
-
     let mut taxonomy = Vec::new();
-    
     for part in parts.iter() {
-        // 提取 "d__Bacteria" -> "Bacteria"
         if let Some(pos) = part.find("__") {
-            let value = &part[pos+2..];
-            taxonomy.push(value.to_string());
+            taxonomy.push(part[pos+2..].to_string());
         } else {
             taxonomy.push(part.to_string());
         }
     }
-
-    // 补齐到 8 个层级（如果只有 7 个，用 species 复制为 strain）
     while taxonomy.len() < 8 {
-        if let Some(last) = taxonomy.last() {
-            taxonomy.push(format!("{}_strain", last));
-        } else {
-            taxonomy.push("unknown".to_string());
-        }
+        if let Some(last) = taxonomy.last() { taxonomy.push(format!("{}_strain", last)); }
+        else { taxonomy.push("unknown".to_string()); }
     }
-
     Ok(taxonomy)
 }
 
-/// 酶切基因组或读取预酶切文件/目录
+// ================== 酶切与合并 (Hash 处理) ==================
+
 fn digest_genomes_to_intermediate_file(
     genomes: &[GenomeRecord],
     enzyme: &'static Enzyme,
@@ -316,23 +303,15 @@ fn digest_genomes_to_intermediate_file(
         return Ok(output_file);
     }
 
-    println!("开始批量酶切基因组 ...");
-    let output_file = output_dir.join(format!("{}.enzyme.fa.gz", enzyme.name));
-
-    // 简化：暂时返回错误，用户需要提供预酶切文件或目录
     bail!("请使用 -e 参数提供预酶切文件或 --pre-digested-dir 提供预酶切目录");
 }
 
-/// 从 extract 批量输出目录合并预酶切文件
 fn merge_pre_digested_files(
     genomes: &[GenomeRecord],
     enzyme: &'static Enzyme,
     pre_digested_dir: &Path,
     output_file: &Path,
 ) -> Result<()> {
-    use std::io::{BufRead, BufReader};
-    use flate2::read::GzDecoder;
-
     let file = File::create(output_file)?;
     let mut writer = GzEncoder::new(file, Compression::default());
 
@@ -341,87 +320,113 @@ fn merge_pre_digested_files(
     let mut found = 0;
 
     for genome in genomes {
-        // 构造预酶切文件路径
         let genome_id = genome.gcf_id.split('.').take(2).collect::<Vec<_>>().join(".");
-        let pre_digested_file = pre_digested_dir.join(format!("{}.{}.fa.gz", genome_id, enzyme.name));
-
-        if !pre_digested_file.exists() {
-            // 尝试其他文件名模式
-            let patterns = [
-                format!("{}.{}.fa.gz", genome.gcf_id, enzyme.name),
-                format!("genome{:02}.{}.fa.gz", processed + 1, enzyme.name),
-            ];
-            
-            let mut file_found = false;
-            for pattern in &patterns {
-                let test_path = pre_digested_dir.join(pattern);
-                if test_path.exists() {
-                    copy_gz_content_with_gcf(&test_path, &genome.gcf_id, &mut writer)?;
-                    file_found = true;
-                    found += 1;
-                    break;
-                }
+        
+        let patterns = [
+            format!("{}.{}.iibdb", genome_id, enzyme.name),
+            format!("{}.{}.fa.gz", genome_id, enzyme.name),
+            format!("{}.{}.iibdb", genome.gcf_id, enzyme.name),
+            format!("{}.{}.fa.gz", genome.gcf_id, enzyme.name),
+        ];
+        
+        let mut file_found = false;
+        for pattern in &patterns {
+            let test_path = pre_digested_dir.join(pattern);
+            if test_path.exists() {
+                // 调用处理函数，将序列转换为 Hash (如果是序列) 或保持 Hash (如果是 Hash)
+                process_and_write_file(&test_path, &genome.gcf_id, &mut writer)?;
+                file_found = true;
+                found += 1;
+                break;
             }
-            
-            if !file_found {
-                eprintln!("警告：未找到基因组 {} 的预酶切文件", genome.gcf_id);
-            }
-        } else {
-            copy_gz_content_with_gcf(&pre_digested_file, &genome.gcf_id, &mut writer)?;
-            found += 1;
+        }
+        
+        if !file_found {
+            eprintln!("警告：未找到基因组 {} 的预酶切文件", genome.gcf_id);
         }
 
         processed += 1;
-        let percent = (processed * 100) / total;
-        if processed % (total / 20).max(1) == 0 || processed == total {
-            print!("\r进度: {}% ({}/{}, 找到 {})", percent, processed, total, found);
+        if processed % (total / 20).max(1) == 0 {
+            print!("\r进度: {}/{}", processed, total);
             std::io::stdout().flush()?;
         }
     }
 
-    println!();
-    drop(writer);
-
-    println!("合并完成：{}/{} 个基因组", found, total);
+    println!("\n合并完成：{}/{} 个基因组", found, total);
     Ok(())
 }
 
-/// 复制 gzip 文件内容并转换为标准格式
-fn copy_gz_content_with_gcf(
-    gz_file: &Path,
+// 读取预酶切文件，转换为统一的 >Header \n Hash 格式写入
+fn process_and_write_file(
+    path: &Path,
     gcf_id: &str,
     writer: &mut GzEncoder<File>,
 ) -> Result<()> {
-    use flate2::read::GzDecoder;
-    use std::io::{BufRead, BufReader};
+    let mut reader = parse_fastx_file(path)?;
 
-    let file = File::open(gz_file)?;
-    let decoder = GzDecoder::new(file);
-    let reader = BufReader::new(decoder);
+    while let Some(record) = reader.next() {
+        let record = record.context("解析Fastx失败")?;
+        let header_bytes = record.id();
+        let header_str = std::str::from_utf8(header_bytes).unwrap_or("");
+        
+        // 尝试解析 header 提取 scaffold, pos 等
+        // 兼容 >scaffold-start-end-index 和 >ID:Pos 等格式
+        // 目标格式: >GCF|index|scaffold|pos|strand|unique
+        
+        let mut scaffold = header_str;
+        let mut pos = "0";
+        let mut tag_index = "0";
 
-    for line in reader.lines() {
-        let line = line?;
-        if line.starts_with('>') {
-            // 转换格式：>scaffold-start-end-index -> >GCF_ID|index|scaffold|pos|strand|unique
-            let header = &line[1..];
-            let parts: Vec<&str> = header.split('-').collect();
-            if parts.len() >= 4 {
-                let scaffold = parts[0];
-                let start = parts[1];
-                let index = parts[3];
-                writeln!(writer, ">{}|{}|{}|{}|0|0", gcf_id, index, scaffold, start)?;
-            } else {
-                writeln!(writer, "{}", line)?;
+        if let Some(parts) = header_str.split_once('|') {
+             // 已经是标准格式 >GCF|index|scaffold|...
+             // 只需提取需要的信息，或者如果已经是目标格式，我们可能不需要做太多
+             // 但为了统一，我们重新组装
+             // 这里的处理依赖于上游 Extract 的输出格式
+             // 假设 Extract 输出的是 >Scaffold-Pos 或 >Scaffold:Pos
+        } 
+        
+        if let Some(idx) = header_str.rfind(':') {
+            scaffold = &header_str[..idx];
+            pos = &header_str[idx+1..];
+        } else if let Some(parts) = header_str.split_once('-') {
+            scaffold = parts.0;
+            if let Some(p) = parts.1.split('-').next() {
+                pos = p;
             }
-        } else {
-            writeln!(writer, "{}", line)?;
+             // 尝试提取 index
+            if let Some(last_dash) = header_str.rfind('-') {
+                 tag_index = &header_str[last_dash+1..];
+            }
         }
-    }
 
+        let seq_bytes = record.seq();
+        let hash_val: Hash;
+
+        // 检查内容是 序列 还是 Hash字符串
+        // 简单的检查方法：看是否包含非数字字符 (注意 Hash 字符串是纯数字)
+        // 或者是解析 u64 成功
+        let seq_str = std::str::from_utf8(&seq_bytes).unwrap_or("");
+        
+        if let Ok(val) = seq_str.trim().parse::<u64>() {
+            // 已经是 Hash
+            hash_val = val;
+        } else {
+            // 是 DNA 序列，计算 Canonical Hash
+            let mut seq_vec = seq_bytes.to_vec();
+            seq_vec.make_ascii_uppercase();
+            let canonical = get_canonical_sequence(&seq_vec);
+            hash_val = hash_bytes(&canonical);
+        }
+
+        // 写入 Hash
+        // Strand 设为 0，Unique 设为 0 (初始状态)
+        writeln!(writer, ">{}|{}|{}|{}|0|0", gcf_id, tag_index, scaffold, pos)?;
+        writeln!(writer, "{}", hash_val)?;
+    }
     Ok(())
 }
 
-/// 为指定分类层级构建数据库
+// ================== 数据库构建 (Hash 版) ==================
 fn build_database_for_level(
     enzyme_file: &Path,
     enzyme: &'static Enzyme,
@@ -432,13 +437,22 @@ fn build_database_for_level(
 ) -> Result<()> {
     println!("第 1 步：统计标签分类信息 ...");
 
-    // 构建 gcf_id -> taxonomy 映射
     let mut gcf_to_taxonomy = FxHashMap::default();
-    for genome in genomes {
-        let taxonomy_str = genome.taxonomy[1..=level as usize].join("\t");
+    
+    // Debug: 打印前 3 个基因组的分类字符串，检查是否符合预期
+    println!("  [DEBUG] 检查分类字符串格式 (Level={}, Index 0..{}):", level.as_str(), level as usize);
+    
+    for (i, genome) in genomes.iter().enumerate() {
+        // [FIX]: 使用 0..level 确保只取到 Species，不含 Strain
+        let end_index = std::cmp::min(level as usize, genome.taxonomy.len());
+        let taxonomy_str = genome.taxonomy[0..end_index].join("\t");
+        
+        println!("  [DEBUG] GCF: {} -> Tax: '{}'", genome.gcf_id, taxonomy_str);
+
         gcf_to_taxonomy.insert(genome.gcf_id.clone(), taxonomy_str);
     }
 
+    // Pass 1: Collect
     let (tag_taxonomy, genome_tags) = collect_tag_taxonomies(
         enzyme_file,
         &gcf_to_taxonomy,
@@ -460,54 +474,64 @@ fn build_database_for_level(
     Ok(())
 }
 
-/// 统计标签分类信息（第一遍扫描）
+type TagTaxonomyMap = FxHashMap<Hash, FxHashSet<String>>;
+type GenomeTagCountMap = FxHashMap<String, FxHashMap<Hash, usize>>;
+
+// ================== 深度调试版核心函数 ==================
 fn collect_tag_taxonomies(
     enzyme_file: &Path,
     gcf_to_taxonomy: &FxHashMap<String, String>,
     genomes: &[GenomeRecord],
     remove_redundant: bool,
-) -> Result<(
-    FxHashMap<Vec<u8>, FxHashSet<String>>,
-    FxHashMap<String, FxHashMap<Vec<u8>, usize>>,
-)> {
-    let mut tag_taxonomy: FxHashMap<Vec<u8>, FxHashSet<String>> = FxHashMap::default();
-    let mut genome_tags: FxHashMap<String, FxHashMap<Vec<u8>, usize>> = FxHashMap::default();
+) -> Result<(TagTaxonomyMap, GenomeTagCountMap)> {
+    let mut tag_taxonomy: TagTaxonomyMap = FxHashMap::default();
+    let mut genome_tags: GenomeTagCountMap = FxHashMap::default();
 
     let mut reader = parse_fastx_file(enzyme_file)?;
     let mut processed_gcfs = FxHashSet::default();
+    let mut total_records = 0;
+    let mut valid_hash_records = 0;
 
     while let Some(record) = reader.next() {
         let record = record.context("解析酶切文件失败")?;
-
+        total_records += 1;
+        
         let header = std::str::from_utf8(record.id()).unwrap_or("");
         let parts: Vec<&str> = header.split('|').collect();
-        if parts.len() < 5 {
-            continue;
-        }
+        // 宽松检查，防止 header 格式轻微差异导致跳过
+        if parts.is_empty() { continue; }
 
         let gcf_id = parts[0].trim_start_matches('>');
-        if !gcf_to_taxonomy.contains_key(gcf_id) {
-            continue;
-        }
-
-        processed_gcfs.insert(gcf_id.to_string());
-
-        let mut tag_seq = record.seq().to_vec();
-        tag_seq.make_ascii_uppercase();
+        if !gcf_to_taxonomy.contains_key(gcf_id) { continue; }
 
         let taxonomy = gcf_to_taxonomy.get(gcf_id).unwrap();
+        processed_gcfs.insert(gcf_id.to_string());
 
-        // Perl 逻辑：如果原始序列已存在就用它，否则用反向互补
-        let rc_tag = reverse_complement(&tag_seq);
-        let canonical_tag = if tag_taxonomy.contains_key(&tag_seq) {
-            tag_seq.clone()
-        } else {
-            // 如果原始序列不存在，使用反向互补（与Perl版本一致）
-            rc_tag.clone()
+        // 解析 Hash
+        let seq_bytes = record.seq();
+        let hash_str = std::str::from_utf8(&seq_bytes).unwrap_or("0");
+        
+        // [DEBUG]: 打印前几个 Hash 字符串，确认是否真的是数字
+        if total_records < 5 {
+             println!("  [DEBUG] 读取Hash行: '{}'", hash_str.trim());
+        }
+
+        let hash_val: Hash = match hash_str.trim().parse() {
+            Ok(v) => {
+                valid_hash_records += 1;
+                v
+            },
+            Err(_) => {
+                // [DEBUG]: 如果解析失败，打印出来看看是什么怪东西
+                if total_records < 10 {
+                    println!("  [WARN] Hash解析失败: '{}' 不是有效的 u64", hash_str.trim());
+                }
+                continue; 
+            },
         };
 
         tag_taxonomy
-            .entry(canonical_tag.clone())
+            .entry(hash_val)
             .or_insert_with(FxHashSet::default)
             .insert(taxonomy.clone());
 
@@ -515,31 +539,34 @@ fn collect_tag_taxonomies(
             *genome_tags
                 .entry(gcf_id.to_string())
                 .or_insert_with(FxHashMap::default)
-                .entry(canonical_tag)
+                .entry(hash_val)
                 .or_insert(0) += 1;
         }
     }
 
     let percent = (processed_gcfs.len() * 100) / genomes.len();
-    println!(
-        "  处理了 {}/{} 个基因组 ({}%)",
-        processed_gcfs.len(),
-        genomes.len(),
-        percent
-    );
+    println!("  [DEBUG] 文件读取统计: 总记录={}, 有效Hash={}, 覆盖基因组={}/{} ({}%)", 
+        total_records, valid_hash_records, processed_gcfs.len(), genomes.len(), percent);
+    println!("  [DEBUG] Map中唯一的Tag(Hash)总数: {}", tag_taxonomy.len());
+
+    // [DEBUG] 随机抽查一个 Tag 看看它的分类情况
+    if let Some((hash, taxa)) = tag_taxonomy.iter().next() {
+        println!("  [DEBUG] 抽查 Tag {}: 对应 {} 个分类字符串", hash, taxa.len());
+        for t in taxa {
+            println!("      -> '{}'", t);
+        }
+    }
 
     Ok((tag_taxonomy, genome_tags))
 }
 
-/// 识别特异性标签并输出数据库（第二遍扫描）
-/// **关键：定量数据库只输出 unique 标签**
 fn identify_and_output_unique_tags(
     enzyme_file: &Path,
     enzyme: &'static Enzyme,
     output_dir: &Path,
     level: TaxonomyLevel,
-    tag_taxonomy: &FxHashMap<Vec<u8>, FxHashSet<String>>,
-    genome_tags: &FxHashMap<String, FxHashMap<Vec<u8>, usize>>,
+    tag_taxonomy: &TagTaxonomyMap,
+    genome_tags: &GenomeTagCountMap,
     remove_redundant: bool,
 ) -> Result<()> {
     let output_path = output_dir.join(format!("{}.{}.fa.gz", enzyme.name, level.as_str()));
@@ -550,89 +577,72 @@ fn identify_and_output_unique_tags(
 
     let mut reader = parse_fastx_file(enzyme_file)?;
     let mut unique_counts: FxHashMap<String, usize> = FxHashMap::default();
+    
+    // [DEBUG] 统计被拒绝的原因
+    let mut rejected_not_found = 0;
+    let mut rejected_ambiguous = 0;
+    let mut rejected_redundant = 0;
+    let mut accepted = 0;
 
     while let Some(record) = reader.next() {
         let record = record.context("解析酶切文件失败")?;
-
         let header = std::str::from_utf8(record.id()).unwrap_or("");
         let parts: Vec<&str> = header.split('|').collect();
-        if parts.len() < 6 {
-            continue;
-        }
+        // 宽松检查
+        if parts.is_empty() { continue; }
 
         let gcf_id = parts[0].trim_start_matches('>');
-        let tag_index = parts[1];
-        let scaffold_id = parts[2];
-        let pos = parts[3];
-        let original_strand = parts[4];
+        // 提取 scaffold, pos 等用于输出
+        let tag_index = if parts.len() > 1 { parts[1] } else { "0" };
+        let scaffold_id = if parts.len() > 2 { parts[2] } else { "scaffold" };
+        let pos = if parts.len() > 3 { parts[3] } else { "0" };
 
-        let mut tag_seq = record.seq().to_vec();
-        tag_seq.make_ascii_uppercase();
+        let seq_bytes = record.seq();
+        let hash_str = std::str::from_utf8(&seq_bytes).unwrap_or("0");
+        let hash_val: Hash = match hash_str.trim().parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
 
-        // Perl 逻辑：如果原始序列不在 hash 中，用反向互补并翻转 strand
-        let rc_tag = reverse_complement(&tag_seq);
-        let (final_tag, final_strand) = if tag_taxonomy.contains_key(&tag_seq) {
-            (tag_seq.clone(), original_strand.to_string())
-        } else {
-            // 如果原始序列不在hash中，使用反向互补（与Perl版本一致）
-            let flipped_strand = if original_strand == "0" {
-                "1".to_string()
+        // 检查特异性
+        let mut is_unique = false;
+        if let Some(taxonomies) = tag_taxonomy.get(&hash_val) {
+            if taxonomies.len() == 1 {
+                is_unique = true;
             } else {
-                "0".to_string()
-            };
-            (rc_tag.clone(), flipped_strand)
-        };
-
-        // 检查是否为特异性标签
-        let mut is_unique = if let Some(taxonomies) = tag_taxonomy.get(&final_tag) {
-            taxonomies.len() == 1
+                rejected_ambiguous += 1;
+            }
         } else {
-            false
-        };
+            rejected_not_found += 1;
+        }
 
         // 检查基因组内冗余
         if is_unique && remove_redundant {
             if let Some(genome_tag_counts) = genome_tags.get(gcf_id) {
-                if let Some(&count) = genome_tag_counts.get(&final_tag) {
-                    if count > 1 {
-                        is_unique = false;
+                if let Some(&count) = genome_tag_counts.get(&hash_val) {
+                    if count > 1 { 
+                        is_unique = false; 
+                        rejected_redundant += 1;
                     }
                 }
             }
         }
 
-        // **关键差异：定量数据库只输出 unique 标签**
         if is_unique {
+            accepted += 1;
             *unique_counts.entry(gcf_id.to_string()).or_insert(0) += 1;
-
-            writeln!(
-                writer,
-                ">{}|{}|{}|{}|{}|1",
-                gcf_id, tag_index, scaffold_id, pos, final_strand
-            )?;
-            writeln!(writer, "{}", std::str::from_utf8(&final_tag).unwrap_or(""))?;
+            // 输出格式 >GCF|index|scaffold|pos|strand|unique
+            writeln!(writer, ">{}|{}|{}|{}|0|1", gcf_id, tag_index, scaffold_id, pos)?;
+            writeln!(writer, "{}", hash_val)?;
         }
     }
 
     drop(writer);
 
+    println!("  [DEBUG] 筛选统计: 接受={}, 拒绝(未找到)={}, 拒绝(分类模糊/多物种)={}, 拒绝(基因组冗余)={}", 
+        accepted, rejected_not_found, rejected_ambiguous, rejected_redundant);
     println!("  输出数据库：{}", output_path.display());
     println!("  包含 {} 个基因组的特异性标签", unique_counts.len());
 
     Ok(())
 }
-
-/// 反向互补
-fn reverse_complement(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .rev()
-        .map(|&b| match b {
-            b'A' => b'T',
-            b'T' => b'A',
-            b'C' => b'G',
-            b'G' => b'C',
-            _ => b,
-        })
-        .collect()
-}
-

@@ -102,7 +102,9 @@ pub struct PipelineArgs {
 pub fn run(args: PipelineArgs) -> Result<()> {
     // 可选：控制 rayon 线程
     if let Some(n) = args.threads {
-        std::env::set_var("RAYON_NUM_THREADS", n.to_string());
+        unsafe {
+            std::env::set_var("RAYON_NUM_THREADS", n.to_string());
+        }
     }
 
     // 创建目录结构
@@ -144,13 +146,12 @@ pub fn run(args: PipelineArgs) -> Result<()> {
                 enzyme_site: args.site.clone(),
                 output_dir: d01.clone(),
                 output_prefix: vec![],        // 由 batch 生成
-                compress: "yes".to_string(),
                 quality_control: "yes".to_string(),
                 max_n: args.max_n,
                 min_quality: args.min_quality,
                 min_quality_percent: args.min_quality_percent,
                 quality_base: args.quality_base,
-                format: "fa".to_string(),
+                //format: "fa".to_string(),
             pear_bin: args.pear_bin.clone().unwrap_or_else(|| "pear".to_string()),
             pear_cpu: args.pear_cpu.unwrap_or(1),
             };
@@ -365,7 +366,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
 
                 // 为单个样品生成列表
                 let sample_list_file = sample_quant_dir.join(format!("{}.list.tsv", sample_name));
-                let sample_iibsp = d01.join(format!("{}.{}.iibsp.gz", sample_name, get_enzyme_name(&args.site)?));
+                let sample_iibsp = d01.join(format!("{}.{}.iibsp", sample_name, get_enzyme_name(&args.site)?));
                 if !sample_iibsp.exists() {
                     eprintln!("警告: 样品 {} 的提取产物不存在，跳过", sample_name);
                     continue;
@@ -525,7 +526,7 @@ fn build_sample_list_for_quantify(
             bail!("样品列表第 {} 行格式错误（至少2列）", ln + 1);
         }
         let sample_name = parts[0];
-        let sp_path = extract_dir.join(format!("{}.{}.iibsp.gz", sample_name, enzyme));
+        let sp_path = extract_dir.join(format!("{}.{}.iibsp", sample_name, enzyme));
         if !sp_path.exists() {
             bail!("找不到样品提取产物：{}", sp_path.display());
         }
