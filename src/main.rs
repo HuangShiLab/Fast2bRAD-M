@@ -13,6 +13,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber;
 
+use tikv_jemallocator::Jemalloc;
+
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "fast2bRAD-M",
@@ -46,13 +51,15 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
-    // 初始化 tracing 日志系统（非阻塞）
+    // 创建一个非阻塞的 writer，输出到 stdout
+    let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stdout());
+
     tracing_subscriber::fmt()
+        .with_writer(non_blocking) // 使用异步 writer
         .with_target(false)
         .with_thread_ids(false)
-        .with_thread_names(false)
         .init();
-    
+
     let cli = Cli::parse();
     match cli.command {
         Commands::Extract(args) => extract::run(args),

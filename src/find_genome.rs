@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use flate2::read::GzDecoder;
 use fxhash::{FxHashMap, FxHashSet};
+use rayon::prelude::*; // 引入 rayon
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -33,18 +34,28 @@ pub struct FindGenomeArgs {
     /// GCF 标签数阈值（默认 1，表示 >1）
     #[arg(long = "gcf", default_value = "1")]
     pub gcf_threshold: i32,
+    
+    /// 线程数 (用于并行处理多个样品)
+    #[arg(short = 'j', long = "threads", default_value = "4")]
+    pub threads: usize,
 }
 
 /// 主函数
 pub fn run(args: FindGenomeArgs) -> Result<()> {
+    // 设置全局线程池
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(args.threads)
+        .build_global();
+
     tracing::info!(
-        "COMMAND: find-genome -l {} -d {} -o {} --qual-dir {} --gscore {} --gcf {}",
+        "COMMAND: find-genome -l {} -d {} -o {} --qual-dir {} --gscore {} --gcf {} -j {}",
         args.sample_list.display(),
         args.database_dir.display(),
         args.output_dir.display(),
         args.qual_dir.display(),
         args.g_score_threshold,
-        args.gcf_threshold
+        args.gcf_threshold,
+        args.threads
     );
 
     // 检查数据库文件
@@ -68,18 +79,23 @@ pub fn run(args: FindGenomeArgs) -> Result<()> {
     let samples = read_sample_list(&args.sample_list)?;
     tracing::info!("共 {} 个样品需要处理", samples.len());
 
-    // 处理每个样品
-    for sample_name in samples {
-        process_sample(
-            &sample_name,
+    // 并行处理每个样品
+    // 使用 try_for_each 可以在出错时提前返回，或者使用 for_each 忽略错误
+    // 这里我们收集错误信息但尽量让其他任务跑完
+    samples.par_iter().for_each(|sample_name| {
+        match process_sample(
+            sample_name,
             &args.qual_dir,
             &args.database_dir,
             &args.output_dir,
             &gcf_to_classify,
             args.g_score_threshold,
             args.gcf_threshold,
-        )?;
-    }
+        ) {
+            Ok(_) => {},
+            Err(e) => tracing::error!("样品 {} 处理失败: {}", sample_name, e),
+        }
+    });
 
     tracing::info!("\n全部完成！");
     Ok(())
@@ -217,7 +233,7 @@ fn process_sample(
     // 遍历每个酶
     for enzyme in &enzymes {
         // 检查数据库文件是否存在
-        let enzyme_db = database_dir.join(format!("{}.species.fa.gz", enzyme));
+        let enzyme_db = database_dir.join(format!("{}.species.iibdb", enzyme));
         if !enzyme_db.exists() {
             tracing::warn!(
                 "警告: 数据库文件不存在: {}",
@@ -421,4 +437,3 @@ fn parse_gcf_detected_file(
 
     Ok(gcf_list)
 }
-

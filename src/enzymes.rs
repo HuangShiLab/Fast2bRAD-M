@@ -659,7 +659,3 @@ pub fn enzyme_by_name(name: &str) -> Option<&'static Enzyme> {
 pub fn enzyme_by_id(id: u8) -> Option<&'static Enzyme> {
     ENZYMES.iter().copied().find(|enzyme| enzyme.id == id)
 }
-
-pub fn supported_enzyme_names() -> Vec<&'static str> {
-    ENZYMES.iter().map(|e| e.name).collect()
-}

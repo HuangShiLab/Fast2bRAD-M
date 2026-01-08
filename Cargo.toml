@@ -13,3 +13,9 @@ needletail = "0.6"
 rayon = "1.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "std"] }
+tikv-jemallocator = "0.5"
+tracing-appender = "0.2"
+structopt = "0.3"  # 或 clap = { version = "4.0", features = ["derive"] }
+csv = "1.2"
+ndarray = "0.15"
+ort = { version = "2.0.0-rc.2", features = ["ndarray"] }

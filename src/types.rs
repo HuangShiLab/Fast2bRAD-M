@@ -1,17 +1,3 @@
-use std::path::PathBuf;
-
-/// 2bRAD 标签文件扩展名（IIB 表示 Type IIB 限制酶）
-pub const TAG_FILE_EXT: &str = "iibsp";
-
-/// 2bRAD 标签数据库文件扩展名
-pub const DB_FILE_EXT: &str = "iibdb";
-
-#[derive(Debug, Clone)]
-pub struct SampleRecord {
-    pub sample_id: String,
-    pub inputs: Vec<PathBuf>,
-}
-
 #[derive(Debug, Clone)]
 pub struct DigestStats {
     pub sample_id: String,
@@ -51,30 +37,6 @@ impl InputType {
             3 => Some(InputType::Single2bRAD),
             4 => Some(InputType::Concatenated2bRAD),
             _ => None,
-        }
-    }
-}
-
-/// 输出格式
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputFormat {
-    Fasta,
-    Fastq,
-}
-
-impl OutputFormat {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "fa" | "fasta" => Some(OutputFormat::Fasta),
-            "fq" | "fastq" => Some(OutputFormat::Fastq),
-            _ => None,
-        }
-    }
-
-    pub fn extension(&self) -> &'static str {
-        match self {
-            OutputFormat::Fasta => "fa",
-            OutputFormat::Fastq => "fq",
         }
     }
 }
