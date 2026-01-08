@@ -48,31 +48,65 @@ conda install -c bioconda pear
 
 将 Perl 的 `2bRADM_Pipline.pl` 流程一键化，串联：
 extract → （可选）build-qual-db → （可选）build-quan-db → quantify → merge  
-产物目录结构：`01_extract/ 02_db_qual/ 03_db_quan/ 04_quantify/ 05_merge/`
+产物目录结构：`01_extract/ 02_db_qual/ 04_quantify/ 05_merge/ qualitative/ quantitative_sdb/`
 
 ```bash
-# 使用已有数据库（推荐：与 Perl 一致的 classify 与 *.fa.gz）
-fast2bRAD-M pipeline \
-  --samples /abs/samples.tsv \
-  --site BcgI \
-  --level species \
-  --outdir /abs/runs/run1 \
-  --prefix run1 \
-  --database /abs/db_ready \
-  --gscore 5 \
-  --resume yes
-
-# 全流程（含数据库构建）：提供 genome-list 和（可选）pre-digested-dir
+# 全流程（含数据库构建）：
 fast2bRAD-M pipeline \
   --mode full \
-  --samples /abs/samples.tsv \
-  --genome-list /abs/genomes.tsv \
-  --pre-digested-dir /abs/predig \
+  --samples /abs/samples_list.tsv \
+  --taxonomy /abs/abfh_classify_with_speciename.txt \
+  --pre-digested-dir /abs/pre_digested_output \
   --site BcgI \
   --level species \
-  --outdir /abs/runs/run_full \
-  --prefix run_full \
+  --outdir /abs/outdir \
+  --prefix run \
   --gscore 5 \
+  --threads 4 \
+  --pc 8\
+  --min-qual 15 \
+  --resume yes
+
+# 数据库构建：
+fast2bRAD-M extract \
+  --genome-list /abs/pre_digested_file_list.tsv \
+  -t 1 \
+  -s BcgI \
+  --od /abs/pre_digested_output \
+  --op db \
+  --threads 5 \
+  --qc yes \
+  -n 0.08 \
+  -q 30 \
+  -p 80
+
+fast2bRAD-M pipeline \
+  --mode db-only \
+  --genome-list /abs/pre_digested_file_list.tsv \
+  --taxonomy /abs/abfh_classify_with_speciename.txt \
+  --site BcgI \
+  --level species \
+  --outdir /abs/outdir \
+  --prefix run \
+  --gscore 5 \
+  --threads 4 \
+  --pc 8 \
+  --min-qual 15 \
+  --resume yes
+
+# 使用已有数据库（推荐：与 Perl 一致的 classify 与 *.fa.gz）
+fast2bRAD-M pipeline \
+  --mode sample-only \
+  --samples /abs/samples_list.tsv \
+  --database /abs/db_ready \
+  --site BcgI \
+  --level species \
+  --outdir /abs/outdir \
+  --prefix run \
+  --gscore 5 \
+  --threads 4 \
+  --pc 8 \
+  --min-qual 15 \
   --resume yes
 ```
 
@@ -88,76 +122,6 @@ fast2bRAD-M pipeline \
 Bash 包装脚本（与上完全等价）：
 ```bash
 bash fast2bRAD-M/scripts/run_pipeline.sh --help
-```
-
-### extract - 数字酶切
-
-从序列数据中提取 2bRAD 标签：
-
-#### 单样品模式
-
-```bash
-# Type 1: 参考基因组
-fast2bRAD-M extract \
-  -i genome.fna.gz \
-  -t 1 \
-  -s 5 \
-  --od output_dir \
-  --op sample_name \
-  --gz yes
-
-# Type 2: Shotgun 测序数据
-fast2bRAD-M extract \
-  -i shotgun.fq.gz \
-  -t 2 \
-  -s BcgI \
-  --od output_dir \
-  --op sample_name \
-  --qc yes \
-  -n 0.08 \
-  -q 30 \
-  -p 80
-
-# Type 2: Shotgun 双端（PEAR 拼接，Perl 对齐）
-# 需先安装 PEAR（conda install -c bioconda pear），并可通过 --pe 指定可执行名/路径，--pc 指定线程
-fast2bRAD-M extract \
-  -i R1.fq.gz R2.fq.gz \
-  -t 2 -s BcgI \
-  --od output_dir --op sample_name \
-  --pe pear --pc 8 \
-  -q 15 --gz yes
-
-# Type 3: 单 2bRAD 标签
-fast2bRAD-M extract \
-  -i 2brad_single.fq.gz \
-  -t 3 \
-  -s 5 \
-  --od output_dir \
-  --op sample_name \
-  --fm fq
-
-# Type 4: 5连标签（需要预先用 PEAR 拼接 R1/R2）
-fast2bRAD-M extract \
-  -i assembled.fq.gz dummy.fq.gz \
-  -t 4 \
-  -s 5 \
-  --od output_dir \
-  --op sample1 sample2 sample3 sample4 sample5 \
-  --qc yes
-```
-
-#### 批量处理模式 ⚡
-
-通过 `--batch` 参数支持**多核并行**批量处理多个样品：
-
-```bash
-# 批量处理样品列表（自动并行加速）
-fast2bRAD-M extract \
-  --batch sample_list.tsv \
-  -t 1 \
-  -s BcgI \
-  --od output_dir \
-  --gz yes
 ```
 
 **性能优势**：
