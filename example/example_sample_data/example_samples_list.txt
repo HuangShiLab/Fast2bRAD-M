@@ -1,0 +1,2 @@
+sample1	example_sample_data/example_samples/sample1.left.fq.gz	example_sample_data/example_samples/sample1.right.fq.gz
+sample2	example_sample_data/example_samples/sample2.left.fq.gz	example_sample_data/example_samples/sample2.right.fq.gz

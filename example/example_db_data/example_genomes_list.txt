@@ -1,0 +1,15 @@
+GCA_000477855.1	example_db_data/example_genomes/GCA_000477855.1_Prop_sp_KPL1847_V1_genomic.fna.gz
+GCA_000521385.1	example_db_data/example_genomes/GCA_000521385.1_ASM52138v1_genomic.fna.gz
+GCA_000521405.1	example_db_data/example_genomes/GCA_000521405.1_ASM52140v1_genomic.fna.gz
+GCA_000521425.1	example_db_data/example_genomes/GCA_000521425.1_ASM52142v1_genomic.fna.gz
+GCA_000521445.1	example_db_data/example_genomes/GCA_000521445.1_ASM52144v1_genomic.fna.gz
+GCF_000007445.1	example_db_data/example_genomes/GCF_000007445.1_ASM744v1_genomic.fna.gz
+GCF_000010485.1	example_db_data/example_genomes/GCF_000010485.1_ASM1048v1_genomic.fna.gz
+GCF_000013265.1	example_db_data/example_genomes/GCF_000013265.1_ASM1326v1_genomic.fna.gz
+GCF_000013305.1	example_db_data/example_genomes/GCF_000013305.1_ASM1330v1_genomic.fna.gz
+GCF_000014845.1	example_db_data/example_genomes/GCF_000014845.1_ASM1484v1_genomic.fna.gz
+GCF_000535755.1	example_db_data/example_genomes/GCF_000535755.1_Stap_aure_M1100_V1_genomic.fna.gz
+GCF_000602265.1	example_db_data/example_genomes/GCF_000602265.1_Stap_aure_F48959_V1_genomic.fna.gz
+GCF_000644715.1	example_db_data/example_genomes/GCF_000644715.1_Stap_aure_VET0432R_V1_genomic.fna.gz
+GCF_000735755.1	example_db_data/example_genomes/GCF_000735755.1_SK1585_newbler2.6_V1_genomic.fna.gz
+GCF_001209085.1	example_db_data/example_genomes/GCF_001209085.1_7907_7_23_genomic.fna.gz
