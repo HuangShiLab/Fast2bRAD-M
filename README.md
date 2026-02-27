@@ -151,8 +151,11 @@ sample2	/path/to/sample2_R1.fq.gz	/path/to/sample2_R2.fq.gz
 ### 支持的酶（1-16）
 
 1. CspCI   2. AloI     3. BsaXI    4. BaeI  
+
 5. BcgI（默认） 6. CjeI  7. PpiI     8. PsrI  
+
 9. BplI    10. FalI    11. Bsp24I  12. HaeIV  
+
 13. CjePI  14. Hin4I   15. AlfI    16. BslFI
 
 ### 参数说明
