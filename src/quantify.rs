@@ -137,13 +137,15 @@ fn load_database(db_file: &Path, classify_file: &Path, tax_level: &str) -> Resul
     let mut tag_theory_num: FxHashMap<String, FxHashMap<String, FxHashMap<u64, usize>>> = FxHashMap::default();
     let mut reader = io_utils::open_binary_reader(db_file)?;
     let mut id_buffer = String::with_capacity(256); // 复用
+    let mut loaded_count = 0usize;
 
     while let Some(hash_val) = reader.next_record_reuse(&mut id_buffer)? {
         let mut parts = id_buffer.split('|');
         let gcf_id = parts.next().unwrap_or("");
         // 跳过 index, scaffold, pos, strand (4个)
         let unique_flag = parts.nth(4).unwrap_or("0");
-        if unique_flag != "1" { continue; }
+        // 兼容旧格式 ("-") 和新格式 ("1")
+        if unique_flag != "1" && unique_flag != "-" { continue; }
         if gcf_id.is_empty() { continue; }
 
         if let Some(taxonomy) = gcf_to_taxonomy.get(gcf_id) {
@@ -151,8 +153,10 @@ fn load_database(db_file: &Path, classify_file: &Path, tax_level: &str) -> Resul
             *tag_theory_num.entry(taxonomy.clone()).or_insert_with(FxHashMap::default)
                 .entry(gcf_id.to_string()).or_insert_with(FxHashMap::default)
                 .entry(hash_val).or_insert(0) += 1;
+            loaded_count += 1;
         }
     }
+    tracing::info!("成功从数据库加载了 {} 个有效唯一标签条目", loaded_count);
     Ok((tag_to_gcfs, gcf_to_taxonomy, tag_theory_num))
 }
 
