@@ -1,0 +1,4 @@
+#Species	K02355	K02358	K00001	K01803	K01190	K01990	K01992
+Cutibacterium_acnes	1	1	0	1	0	5	2
+Escherichia_coli	1	1	2	1	1	12	4
+Staphylococcus_aureus	1	1	1	1	0	8	3
