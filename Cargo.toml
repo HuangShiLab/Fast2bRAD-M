@@ -2,20 +2,33 @@
 name = "fast2bRAD-M"
 version = "0.1.0"
 edition = "2021"
+authors = ["ZHANG Yufeng"]
+description = "A fast and efficient tool for 2bRAD-M microbial taxonomic profiling"
 
 [dependencies]
-anyhow = "1.0"
-clap = { version = "4.5", features = ["derive"] }
-flate2 = "1.1.5"
-fxhash = "0.2.1"
-indicatif = "0.17"
-needletail = "0.6"
-rayon = "1.10"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "std"] }
-tikv-jemallocator = "0.5"
+# 核心错误处理与命令行解析
+anyhow = "1.0"           # 灵活的错误处理
+clap = { version = "4.0", features = ["derive"] } # 高级命令行解析
+structopt = "0.3"        # 简化版命令行封装（用于 main.rs）
+tikv-jemallocator = "0.6"
 tracing-appender = "0.2"
-structopt = "0.3"  # 或 clap = { version = "4.0", features = ["derive"] }
-csv = "1.2"
-ndarray = "0.15"
-ort = { version = "2.0.0-rc.2", features = ["ndarray"] }
+
+# 高性能计算与数据结构
+fxhash = "0.2"           # 针对生物信息学短序列哈希优化的快速哈希库
+rayon = "1.8"            # 轻松实现数据并行处理
+ndarray = "0.15"         # 用于机器学习模块的矩阵运算
+
+# 生物信息学特定解析
+needletail = "0.5"       # 极速解析 FASTA/FASTQ 文件
+flate2 = "1.0"           # 支持 .gz 压缩文件的读写
+
+# 机器学习推理 (ONNX Runtime)
+ort = {version = "2.0.0-rc.12", features = ["ndarray"]}              # 运行随机森林等 ONNX 模型
+
+# 日志与进度监控
+tracing = "0.1"          # 结构化日志记录
+tracing-subscriber = "0.3" # 日志输出到终端
+indicatif = "0.17"       # 数据库构建时的进度条显示
+
+# 文件处理
+csv = "1.3"              # 高效处理 TSV/CSV 丰度表
