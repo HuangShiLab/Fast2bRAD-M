@@ -6,6 +6,7 @@ mod find_genome;
 mod io_utils;
 mod merge;
 mod pipeline;
+mod predict;
 mod quantify;
 mod types;
 
@@ -46,7 +47,10 @@ enum Commands {
     /// 根据定性结果筛选定量基因组
     FindGenome(find_genome::FindGenomeArgs),
 
-    /// 一键流水线：extract → build-db → quantify → merge
+    /// 功能丰度预测：t(物种丰度表) × 物种功能矩阵 = 功能丰度表
+    Predict(predict::PredictArgs),
+
+    /// 一键流水线：extract → build-db → quantify → merge → predict
     Pipeline(pipeline::PipelineArgs),
 }
 
@@ -68,6 +72,7 @@ fn main() -> Result<()> {
         Commands::Quantify(args) => quantify::run(args),
         Commands::Merge(args) => merge::run(args),
         Commands::FindGenome(args) => find_genome::run(args),
+        Commands::Predict(args) => predict::run(args),
         Commands::Pipeline(args) => pipeline::run(args),
     }
 }

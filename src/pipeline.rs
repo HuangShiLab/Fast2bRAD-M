@@ -13,8 +13,9 @@ use crate::build_quan_db;
 use crate::extract;
 use crate::find_genome;
 use crate::merge;
+use crate::predict;
 use crate::quantify;
-use crate::enzymes::{enzyme_by_id, enzyme_by_name}; 
+use crate::enzymes::{enzyme_by_id, enzyme_by_name};
 
 // --- PipelineArgs 结构体 ---
 
@@ -102,6 +103,12 @@ pub struct PipelineArgs {
     pub mock_samples: Option<String>,
     #[arg(long = "control")]
     pub control_samples: Option<String>,
+
+    // --- predict 相关 ---
+    /// 物种-功能映射矩阵（TSV：第一列=物种名，其余列=功能ID，值=基因拷贝数）
+    /// 提供此参数时，pipeline 在 merge 后自动进行功能丰度预测
+    #[arg(long = "ko-mapping")]
+    pub ko_mapping: Option<PathBuf>,
 }
 
 pub fn run(args: PipelineArgs) -> Result<()> {
@@ -450,6 +457,32 @@ pub fn run(args: PipelineArgs) -> Result<()> {
         std::fs::write(&merge_done_marker, b"ok")?;
     } else {
         tracing::info!("resume=on: 跳过 merge（已存在）");
+    }
+
+    // Step 6/6 (可选): 功能丰度预测
+    if let Some(ko_mapping_file) = &args.ko_mapping {
+        tracing::info!("\n===== [6/6] 功能丰度预测 (predict) =====");
+        let abundance_file = d05.join(format!("{}.all.xls", args.prefix));
+        if !abundance_file.exists() {
+            tracing::warn!(
+                "警告: 物种丰度文件不存在 ({})，跳过功能预测",
+                abundance_file.display()
+            );
+        } else {
+            let predict_done_marker = d05.join(".predict.done");
+            if !resume || !predict_done_marker.exists() {
+                let p_args = predict::PredictArgs {
+                    abundance_file,
+                    mapping_file: ko_mapping_file.clone(),
+                    output_dir: d05.clone(),
+                    prefix: args.prefix.clone(),
+                };
+                predict::run(p_args).context("功能预测阶段失败")?;
+                std::fs::write(&predict_done_marker, b"ok")?;
+            } else {
+                tracing::info!("resume=on: 跳过功能预测（已存在）");
+            }
+        }
     }
 
     tracing::info!("\n流水线完成：{}", args.outdir.display());
