@@ -10,7 +10,8 @@ time (fast2bRAD-M pipeline \
   --threads 4 \
   --pc 8 \
   --min-qual 15 \
-  --resume no )
+  --resume no \
+  --ko-mapping example_db_data/example_ko_mapping.txt)
 
 time (fast2bRAD-M pipeline \
   --mode sample-only \
@@ -24,4 +25,5 @@ time (fast2bRAD-M pipeline \
   --threads 4 \
   --pc 8 \
   --min-qual 15 \
-  --resume no )
+  --resume no \
+  --ko-mapping example_db_data/example_ko_mapping.txt)
