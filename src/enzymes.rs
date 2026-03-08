@@ -17,15 +17,6 @@ pub struct Enzyme {
     pub id: u8,
     pub tag_length: usize,
     pub patterns: &'static [Pattern],
-    // Type 4 (5连标签) 的位置参数（暂未使用）
-    #[allow(dead_code)]
-    pub concat_starts: &'static [usize],
-    #[allow(dead_code)]
-    pub concat_ends: &'static [usize],
-    #[allow(dead_code)]
-    pub min_pear: Option<usize>,
-    #[allow(dead_code)]
-    pub max_pear: Option<usize>,
 }
 
 impl Pattern {
@@ -38,8 +29,8 @@ impl Pattern {
     }
 }
 
-// 创建一个静态查找表，大小为 256 (u8 的范围)
-// 只有 ATCGatcg 的位置是 true，其他（包括 N）都是 false
+// Create a static lookup table of size 256 (the range of u8)
+// Only positions for ATCGatcg are true; all others (including N) are false
 const ATCG_TABLE: [bool; 256] = {
     let mut table = [false; 256];
     table[b'A' as usize] = true; table[b'a' as usize] = true;
@@ -51,13 +42,13 @@ const ATCG_TABLE: [bool; 256] = {
 
 #[inline]
 fn is_pure_atcg(window: &[u8]) -> bool {
-    // 这种查表法是 O(1) 的指令，通常比分支判断更快
+    // This table-lookup approach is O(1) and is typically faster than branch-based checks
     window.iter().all(|&b| ATCG_TABLE[b as usize])
 }
 
 impl Enzyme {
 
-    /// 在序列中查找所有匹配的标签位置和长度（去重）
+    /// Find all matching tag positions and lengths in the sequence (deduplicated)
     pub fn find_all_tags(&self, sequence: &[u8]) -> Vec<(usize, usize)> {
         let mut positions = FxHashSet::default();
 
@@ -81,7 +72,7 @@ impl Enzyme {
     }
 }
 
-// ========== 16 种酶的定义 ==========
+// ========== Definitions for 16 enzymes ==========
 
 // 1. CspCI (tag_length=36)
 const CSPCI_PATTERN_FORWARD_ANCHORS: [Anchor; 2] = [
@@ -117,10 +108,6 @@ pub const CSPCI: Enzyme = Enzyme {
     id: 1,
     tag_length: 36,
     patterns: &CSPCI_PATTERNS,
-    concat_starts: &[0, 37, 78, 119, 160],
-    concat_ends: &[41, 82, 123, 164, 205],
-    min_pear: None,
-    max_pear: None,
 };
 
 // 2. AloI (tag_length=37)
@@ -157,10 +144,6 @@ pub const ALOI: Enzyme = Enzyme {
     id: 2,
     tag_length: 37,
     patterns: &ALOI_PATTERNS,
-    concat_starts: &[0, 38, 80, 122, 164],
-    concat_ends: &[42, 84, 126, 168, 210],
-    min_pear: None,
-    max_pear: None,
 };
 
 // 3. BsaXI (tag_length=32)
@@ -197,10 +180,6 @@ pub const BSAXI: Enzyme = Enzyme {
     id: 3,
     tag_length: 32,
     patterns: &BSAXI_PATTERNS,
-    concat_starts: &[0, 33, 69, 105, 141],
-    concat_ends: &[35, 71, 107, 143, 180],
-    min_pear: Some(173),
-    max_pear: Some(181),
 };
 
 // 4. BaeI (tag_length=36)
@@ -237,10 +216,6 @@ pub const BAEI: Enzyme = Enzyme {
     id: 4,
     tag_length: 36,
     patterns: &BAEI_PATTERNS,
-    concat_starts: &[0, 38, 79, 120, 161],
-    concat_ends: &[40, 81, 122, 163, 205],
-    min_pear: Some(198),
-    max_pear: Some(206),
 };
 
 // 5. BcgI (tag_length=32)
@@ -277,10 +252,6 @@ pub const BCGI: Enzyme = Enzyme {
     id: 5,
     tag_length: 32,
     patterns: &BCGI_PATTERNS,
-    concat_starts: &[0, 36, 75, 114, 153],
-    concat_ends: &[38, 77, 116, 155, 195],
-    min_pear: Some(188),
-    max_pear: Some(196),
 };
 
 // 6. CjeI (tag_length=37)
@@ -317,10 +288,6 @@ pub const CJEI: Enzyme = Enzyme {
     id: 6,
     tag_length: 37,
     patterns: &CJEI_PATTERNS,
-    concat_starts: &[0, 40, 83, 126, 169],
-    concat_ends: &[42, 85, 128, 171, 214],
-    min_pear: None,
-    max_pear: None,
 };
 
 // 7. PpiI (tag_length=35)
@@ -357,10 +324,6 @@ pub const PPII: Enzyme = Enzyme {
     id: 7,
     tag_length: 35,
     patterns: &PPII_PATTERNS,
-    concat_starts: &[0, 37, 77, 117, 157],
-    concat_ends: &[39, 79, 119, 159, 199],
-    min_pear: None,
-    max_pear: None,
 };
 
 // 8. PsrI (tag_length=35)
@@ -397,10 +360,6 @@ pub const PSRI: Enzyme = Enzyme {
     id: 8,
     tag_length: 35,
     patterns: &PSRI_PATTERNS,
-    concat_starts: &[0, 37, 77, 117, 157],
-    concat_ends: &[39, 79, 119, 159, 199],
-    min_pear: None,
-    max_pear: None,
 };
 
 // 9. BplI (tag_length=35, palindrome)
@@ -422,10 +381,6 @@ pub const BPLI: Enzyme = Enzyme {
     id: 9,
     tag_length: 35,
     patterns: &BPLI_PATTERNS,
-    concat_starts: &[0, 37, 77, 117, 157],
-    concat_ends: &[39, 79, 119, 159, 199],
-    min_pear: None,
-    max_pear: None,
 };
 
 // 10. FalI (tag_length=36, palindrome)
@@ -447,10 +402,6 @@ pub const FALI: Enzyme = Enzyme {
     id: 10,
     tag_length: 36,
     patterns: &FALI_PATTERNS,
-    concat_starts: &[0, 37, 77, 117, 157],
-    concat_ends: &[39, 79, 119, 159, 200],
-    min_pear: Some(193),
-    max_pear: Some(201),
 };
 
 // 11. Bsp24I (tag_length=36)
@@ -487,10 +438,6 @@ pub const BSP24I: Enzyme = Enzyme {
     id: 11,
     tag_length: 36,
     patterns: &BSP24I_PATTERNS,
-    concat_starts: &[0, 37, 77, 117, 157],
-    concat_ends: &[39, 79, 119, 159, 200],
-    min_pear: None,
-    max_pear: None,
 };
 
 // 12. HaeIV (tag_length=37)
@@ -515,10 +462,6 @@ pub const HAEIV: Enzyme = Enzyme {
     id: 12,
     tag_length: 37,
     patterns: &HAEIV_PATTERNS,
-    concat_starts: &[0, 38, 79, 120, 161],
-    concat_ends: &[40, 81, 122, 163, 204],
-    min_pear: None,
-    max_pear: None,
 };
 
 // 13. CjePI (tag_length=38)
@@ -555,10 +498,6 @@ pub const CJEPI: Enzyme = Enzyme {
     id: 13,
     tag_length: 38,
     patterns: &CJEPI_PATTERNS,
-    concat_starts: &[0, 39, 81, 123, 165],
-    concat_ends: &[41, 83, 125, 167, 209],
-    min_pear: None,
-    max_pear: None,
 };
 
 // 14. Hin4I (tag_length=35)
@@ -583,10 +522,6 @@ pub const HIN4I: Enzyme = Enzyme {
     id: 14,
     tag_length: 35,
     patterns: &HIN4I_PATTERNS,
-    concat_starts: &[0, 37, 77, 117, 157],
-    concat_ends: &[39, 79, 119, 159, 199],
-    min_pear: None,
-    max_pear: None,
 };
 
 // 15. AlfI (tag_length=33, palindrome)
@@ -608,10 +543,6 @@ pub const ALFI: Enzyme = Enzyme {
     id: 15,
     tag_length: 33,
     patterns: &ALFI_PATTERNS,
-    concat_starts: &[0, 36, 75, 114, 153],
-    concat_ends: &[38, 77, 116, 155, 194],
-    min_pear: None,
-    max_pear: None,
 };
 
 // 16. BslFI (tag_length=33)
@@ -636,13 +567,9 @@ pub const BSLFI: Enzyme = Enzyme {
     id: 16,
     tag_length: 33,
     patterns: &BSLFI_PATTERNS,
-    concat_starts: &[0, 34, 72, 110, 148],
-    concat_ends: &[38, 76, 114, 152, 190],
-    min_pear: None,
-    max_pear: None,
 };
 
-// ========== 酶查找函数 ==========
+// ========== Enzyme lookup functions ==========
 
 static ENZYMES: &[&Enzyme] = &[
     &CSPCI, &ALOI, &BSAXI, &BAEI, &BCGI, &CJEI, &PPII, &PSRI, &BPLI, &FALI, &BSP24I, &HAEIV,

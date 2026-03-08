@@ -30,7 +30,7 @@
 
 - **High Performance** — Rust implementation with Rayon multi-core parallelism; batch-digesting 15 reference genomes in < 0.12 s
 - **Full Enzyme Support** — All 16 Type IIB restriction enzymes (BcgI, CspCI, AloI, BsaXI, BaeI, CjeI, PpiI, PsrI, BplI, FalI, Bsp24I, HaeIV, CjePI, Hin4I, AlfI, BslFI)
-- **All Input Types** — Reference genomes, Shotgun metagenomic reads (SE/PE), single 2bRAD tags, and 5-concatenated tags
+- **All Input Types** — Reference genomes, Shotgun metagenomic reads (SE/PE), and single 2bRAD tags
 - **Built-in QC** — N-ratio, minimum quality score, and minimum quality-percent filtering
 - **Functional Prediction** — Matrix-multiplication-based functional abundance profiling (KO, KEGG, etc.)
 - **Resume Support** — `.done` marker files allow interrupted runs to be resumed without re-computation
@@ -156,14 +156,13 @@ fast2bRAD-M extract \
 | 1    | Reference genome FASTA (for database construction) |
 | 2    | Shotgun metagenome reads (SE or PE; PE can use PEAR merging) |
 | 3    | Single 2bRAD tag reads |
-| 4    | 5-concatenated 2bRAD tag reads |
 
 **Output**:
-- `{prefix}.{enzyme}.iibsp` — Binary tag file for sample reads
-- `{prefix}.{enzyme}.iibdb` — Binary tag file for reference genomes
+- `{prefix}.{enzyme}.iibsp` — Binary tag file for sample reads (Types 2 & 3)
+- `{prefix}.{enzyme}.iibdb` — Binary tag file for reference genomes (Type 1)
 - `{prefix}.{enzyme}.stat.tsv` — Digest statistics
 
-**Paired-end with PEAR merging** (optional):
+**Paired-end with PEAR merging** (optional, Type 2 only):
 ```bash
 fast2bRAD-M extract \
   -i sample_R1.fq.gz sample_R2.fq.gz \
@@ -558,8 +557,6 @@ Fast2bRAD-M uses a compact binary format (`.iibsp` / `.iibdb`) for storing hashe
 If you use Fast2bRAD-M in your research, please cite the original 2bRAD-M paper:
 
 > **2bRAD-M: Genome-level microbiome analysis using 2bRAD sequencing**
-> Huang Lab, *Bioinformatics* (2022)
-> https://github.com/HuangShiLab/2bRAD-M
 
 ---
 

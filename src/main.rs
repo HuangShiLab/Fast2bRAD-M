@@ -32,34 +32,34 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// 数字酶切：根据酶位点从序列中提取 2bRAD 标签
+    /// In-silico restriction digestion: extract 2bRAD tags from sequences at enzyme sites
     Extract(extract::ExtractArgs),
-    /// 构建定性数据库：从参考基因组构建分类特异性标签数据库
+    /// Build qualitative database: build a taxon-specific tag database from reference genomes
     BuildQualDb(build_qual_db::BuildQualDbArgs),
-    /// 构建定量数据库：只输出 unique 标签
+    /// Build quantitative database: output unique tags only
     BuildQuanDb(build_quan_db::BuildQuanDbArgs),
-    /// 丰度计算：计算样品中微生物的相对丰度
+    /// Abundance quantification: compute the relative abundance of microbes in a sample
     Quantify(quantify::QuantifyArgs),
 
-    /// 合并多样品丰度表
+    /// Merge multi-sample abundance tables
     Merge(merge::MergeArgs),
 
-    /// 根据定性结果筛选定量基因组
+    /// Select genomes for quantification based on qualitative results
     FindGenome(find_genome::FindGenomeArgs),
 
-    /// 功能丰度预测：t(物种丰度表) × 物种功能矩阵 = 功能丰度表
+    /// Functional abundance prediction: t(species abundance table) × species function matrix = functional abundance table
     Predict(predict::PredictArgs),
 
-    /// 一键流水线：extract → build-db → quantify → merge → predict
+    /// One-command pipeline: extract → build-db → quantify → merge → predict
     Pipeline(pipeline::PipelineArgs),
 }
 
 fn main() -> Result<()> {
-    // 创建一个非阻塞的 writer，输出到 stdout
+    // Create a non-blocking writer that outputs to stdout
     let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stdout());
 
     tracing_subscriber::fmt()
-        .with_writer(non_blocking) // 使用异步 writer
+        .with_writer(non_blocking) // Use async writer
         .with_target(false)
         .with_thread_ids(false)
         .init();

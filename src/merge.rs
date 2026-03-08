@@ -6,34 +6,34 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tracing;
 
-/// 合并多样品丰度表
+/// Merge multi-sample abundance tables
 #[derive(Parser, Debug)]
 pub struct MergeArgs {
-    /// 样品列表文件（TSV格式：sample_name<tab>profile_path）
+    /// Sample list file (TSV format: sample_name<tab>profile_path)
     #[arg(short = 'l', long = "list")]
     pub sample_list: PathBuf,
 
-    /// 输出目录
+    /// Output directory
     #[arg(short = 'o', long = "output")]
     pub output_dir: PathBuf,
 
-    /// 输出文件前缀
+    /// Output file prefix
     #[arg(short = 'p', long = "prefix", default_value = "Abundance_Stat")]
     pub prefix: String,
 
-    /// Mock样品名称（逗号分隔，用于过滤）
+    /// Mock sample names (comma-separated, for filtering)
     #[arg(short = 'm', long = "mock")]
     pub mock_samples: Option<String>,
 
-    /// 阴性对照样品名称（逗号分隔，用于过滤）
+    /// Negative control sample names (comma-separated, for filtering)
     #[arg(short = 'c', long = "control")]
     pub control_samples: Option<String>,
 }
 
-/// 物种丰度数据
+/// Species abundance data
 #[derive(Debug, Default)]
 struct TaxonAbundance {
-    /// 样品名 -> 相对丰度值
+    /// sample name -> relative abundance
     samples: FxHashMap<String, f64>,
 }
 
@@ -45,11 +45,11 @@ pub fn run(args: MergeArgs) -> Result<()> {
         args.prefix
     );
 
-    // 创建输出目录
+    // creating output directory
     std::fs::create_dir_all(&args.output_dir)
-        .with_context(|| format!("无法创建输出目录: {}", args.output_dir.display()))?;
+        .with_context(|| format!("Cannot create output directory: {}", args.output_dir.display()))?;
 
-    // 解析mock和control样品列表
+    // parsing mock and control sample lists
     let mock_set: FxHashMap<String, ()> = if let Some(ref mock) = args.mock_samples {
         mock.split(',').map(|s| (s.trim().to_string(), ())).collect()
     } else {
@@ -62,21 +62,21 @@ pub fn run(args: MergeArgs) -> Result<()> {
         FxHashMap::default()
     };
 
-    // 读取所有样品的丰度数据
+    // reading abundance data for all samples
     let (taxa_abundance, sample_order, header) = read_all_profiles(&args.sample_list)?;
-    
+
     if sample_order.is_empty() {
-        bail!("未找到有效的样品丰度文件");
+        bail!("No valid sample abundance files found");
     }
 
-    tracing::info!("共读取 {} 个样品", sample_order.len());
+    tracing::info!("Read {} samples in total", sample_order.len());
 
-    // 输出合并后的丰度表（all.xls）
+    // write merged abundance table (all.xls)
     let all_output = args.output_dir.join(format!("{}.all.xls", args.prefix));
     write_merged_table(&all_output, &taxa_abundance, &sample_order, &header)?;
-    tracing::info!("✅ 合并表已输出：{}", all_output.display());
+    tracing::info!("Merged table written: {}", all_output.display());
 
-    // 输出过滤后的丰度表（filtered.xls）
+    // write filtered abundance table (filtered.xls)
     let filtered_output = args.output_dir.join(format!("{}.filtered.xls", args.prefix));
     write_filtered_table(
         &filtered_output,
@@ -86,18 +86,18 @@ pub fn run(args: MergeArgs) -> Result<()> {
         &mock_set,
         &control_set,
     )?;
-    tracing::info!("✅ 过滤表已输出：{}", filtered_output.display());
+    tracing::info!("Filtered table written: {}", filtered_output.display());
 
-    tracing::info!("\n全部完成！");
+    tracing::info!("\nAll done!");
     Ok(())
 }
 
-/// 读取所有样品的丰度数据
+/// Read abundance data for all samples
 fn read_all_profiles(
     list_file: &Path,
 ) -> Result<(FxHashMap<String, TaxonAbundance>, Vec<String>, String)> {
     let file = File::open(list_file)
-        .with_context(|| format!("无法打开样品列表: {}", list_file.display()))?;
+        .with_context(|| format!("Cannot open sample list: {}", list_file.display()))?;
     let reader = BufReader::new(file);
 
     let mut taxa_abundance: FxHashMap<String, TaxonAbundance> = FxHashMap::default();
@@ -109,7 +109,7 @@ fn read_all_profiles(
     for line in reader.lines() {
         let line = line?;
         let line = line.trim();
-        
+
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -123,15 +123,15 @@ fn read_all_profiles(
         let profile_path = Path::new(parts[1]);
 
         if !profile_path.exists() {
-            tracing::warn!("警告：样品 {} 的丰度文件不存在：{}", sample_name, profile_path.display());
+            tracing::warn!("Warning: abundance file for sample {} not found: {}", sample_name, profile_path.display());
             continue;
         }
 
         sample_order.push(sample_name.clone());
 
-        // 读取样品丰度文件
+        // read sample abundance file
         let profile_file = File::open(profile_path)
-            .with_context(|| format!("无法打开丰度文件: {}", profile_path.display()))?;
+            .with_context(|| format!("Cannot open abundance file: {}", profile_path.display()))?;
         let profile_reader = BufReader::new(profile_file);
 
         for line in profile_reader.lines() {
@@ -139,7 +139,7 @@ fn read_all_profiles(
             let line = line.trim();
 
             if line.starts_with("#Kingdom") || line.starts_with("Kingdom") {
-                // 解析表头，确定分类列的范围
+                // parse header to determine the range of taxonomy columns
                 let fields: Vec<&str> = line.trim_start_matches('#').split('\t').collect();
                 for (i, field) in fields.iter().enumerate() {
                     if *field == "Theoretical_Tag_Num" {
@@ -160,29 +160,29 @@ fn read_all_profiles(
                 continue;
             }
 
-            // 提取分类ID
+            // extract taxonomy ID
             let taxon_id = fields[0..=classify_col].join("\t");
-            
-            // 提取 Sequenced_Reads_Num/Theoretical_Tag_Num（倒数第4列）
+
+            // extract Sequenced_Reads_Num/Theoretical_Tag_Num (4th column from the end)
             if fields.len() >= 4 {
                 let abundance_value: f64 = fields[fields.len() - 4]
                     .parse()
                     .unwrap_or(0.0);
 
-                // 记录该分类在该样品中的丰度值
+                // record the abundance value of this taxon in this sample
                 taxa_abundance
                     .entry(taxon_id.clone())
                     .or_insert_with(TaxonAbundance::default)
                     .samples
                     .insert(sample_name.clone(), abundance_value);
 
-                // 累加样品总量
+                // accumulate sample total
                 *sample_totals.entry(sample_name.clone()).or_insert(0.0) += abundance_value;
             }
         }
     }
 
-    // 归一化：计算相对丰度（每个分类占样品总量的百分比）
+    // normalization: compute relative abundance (each taxon as a fraction of sample total)
     for (_taxon_id, abundance) in taxa_abundance.iter_mut() {
         for (sample_name, value) in abundance.samples.iter_mut() {
             if let Some(&total) = sample_totals.get(sample_name) {
@@ -196,7 +196,7 @@ fn read_all_profiles(
     Ok((taxa_abundance, sample_order, header))
 }
 
-/// 输出合并后的丰度表（all.xls）
+/// Write merged abundance table (all.xls)
 fn write_merged_table(
     output_path: &Path,
     taxa_abundance: &FxHashMap<String, TaxonAbundance>,
@@ -204,24 +204,24 @@ fn write_merged_table(
     header: &str,
 ) -> Result<()> {
     let file = File::create(output_path)
-        .with_context(|| format!("无法创建输出文件: {}", output_path.display()))?;
+        .with_context(|| format!("Cannot create output file: {}", output_path.display()))?;
     let mut writer = BufWriter::new(file);
 
-    // 写入表头
+    // write header
     write!(writer, "{}", header)?;
     for sample in sample_order {
         write!(writer, "\t{}", sample)?;
     }
     writeln!(writer)?;
 
-    // 写入数据（按分类ID排序）
+    // write data (sorted by taxon ID)
     let mut taxa_list: Vec<&String> = taxa_abundance.keys().collect();
     taxa_list.sort();
 
     for taxon_id in taxa_list {
         let abundance = &taxa_abundance[taxon_id];
-        
-        // 检查是否至少有一个样品中存在该分类
+
+        // check whether at least one sample contains this taxon
         let has_data = sample_order.iter().any(|sample| {
             abundance.samples.get(sample).map_or(false, |&v| v > 0.0)
         });
@@ -245,7 +245,7 @@ fn write_merged_table(
     Ok(())
 }
 
-/// 输出过滤后的丰度表（filtered.xls）
+/// Write filtered abundance table (filtered.xls)
 fn write_filtered_table(
     output_path: &Path,
     taxa_abundance: &FxHashMap<String, TaxonAbundance>,
@@ -255,10 +255,10 @@ fn write_filtered_table(
     control_set: &FxHashMap<String, ()>,
 ) -> Result<()> {
     let file = File::create(output_path)
-        .with_context(|| format!("无法创建输出文件: {}", output_path.display()))?;
+        .with_context(|| format!("Cannot create output file: {}", output_path.display()))?;
     let mut writer = BufWriter::new(file);
 
-    // 过滤样品列表（移除mock和control）
+    // filter sample list (remove mock and control)
     let filtered_samples: Vec<String> = sample_order
         .iter()
         .filter(|s| !mock_set.contains_key(*s) && !control_set.contains_key(*s))
@@ -266,12 +266,12 @@ fn write_filtered_table(
         .collect();
 
     if filtered_samples.is_empty() {
-        tracing::warn!("警告：过滤后没有剩余样品");
-        // 创建空文件
+        tracing::warn!("Warning: no samples remaining after filtering");
+        // create empty file
         return Ok(());
     }
 
-    // 收集在control样品中检测到的分类（潜在污染）
+    // collect taxa detected in control samples (potential contamination)
     let mut contamination_taxa: FxHashMap<String, ()> = FxHashMap::default();
     for (taxon_id, abundance) in taxa_abundance.iter() {
         for control_sample in control_set.keys() {
@@ -282,26 +282,26 @@ fn write_filtered_table(
         }
     }
 
-    // 写入表头
+    // write header
     write!(writer, "{}", header)?;
     for sample in &filtered_samples {
         write!(writer, "\t{}", sample)?;
     }
     writeln!(writer)?;
 
-    // 写入数据
+    // write data
     let mut taxa_list: Vec<&String> = taxa_abundance.keys().collect();
     taxa_list.sort();
 
     for taxon_id in taxa_list {
-        // 跳过潜在污染的分类
+        // skip taxa flagged as potential contamination
         if contamination_taxa.contains_key(taxon_id) {
             continue;
         }
 
         let abundance = &taxa_abundance[taxon_id];
-        
-        // 检查在过滤后的样品中是否有数据
+
+        // check whether any filtered sample has data
         let has_data = filtered_samples.iter().any(|sample| {
             abundance.samples.get(sample).map_or(false, |&v| v > 0.0)
         });
@@ -324,4 +324,3 @@ fn write_filtered_table(
 
     Ok(())
 }
-

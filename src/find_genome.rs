@@ -2,47 +2,47 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use flate2::read::GzDecoder;
 use fxhash::{FxHashMap, FxHashSet};
-use rayon::prelude::*; // 引入 rayon
+use rayon::prelude::*; // import rayon
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tracing;
 
-/// 根据定性结果筛选定量基因组
+/// Select genomes for quantification based on qualitative results
 #[derive(Parser, Debug)]
 pub struct FindGenomeArgs {
-    /// 样品列表文件（TSV格式：sample_name<tab>...）
+    /// sample list file (TSV format: sample_name<tab>...)
     #[arg(short = 'l', long = "list")]
     pub sample_list: PathBuf,
 
-    /// 数据库目录
+    /// database directory
     #[arg(short = 'd', long = "database")]
     pub database_dir: PathBuf,
 
-    /// 输出目录
+    /// output directory
     #[arg(short = 'o', long = "output")]
     pub output_dir: PathBuf,
 
-    /// 定性结果目录
+    /// qualitative results directory
     #[arg(long = "qual-dir", alias = "qualdir")]
     pub qual_dir: PathBuf,
 
-    /// G-score 阈值（默认 5，表示 >5）
+    /// G-score threshold (default 5, meaning >5)
     #[arg(long = "gscore", default_value = "5")]
     pub g_score_threshold: i32,
 
-    /// GCF 标签数阈值（默认 1，表示 >1）
+    /// minimum detected tags per GCF (default 1, meaning >1)
     #[arg(long = "gcf", default_value = "1")]
     pub gcf_threshold: i32,
-    
-    /// 线程数 (用于并行处理多个样品)
+
+    /// thread count (for parallel sample processing)
     #[arg(short = 'j', long = "threads", default_value = "4")]
     pub threads: usize,
 }
 
-/// 主函数
+/// Main function
 pub fn run(args: FindGenomeArgs) -> Result<()> {
-    // 设置全局线程池
+    // Set up global thread pool
     let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(args.threads)
         .build_global();
@@ -58,30 +58,29 @@ pub fn run(args: FindGenomeArgs) -> Result<()> {
         args.threads
     );
 
-    // 检查数据库文件
+    // Check database file
     let classify_file = args.database_dir.join("abfh_classify_with_speciename.txt.gz");
     if !classify_file.exists() {
         bail!(
-            "数据库文件不存在: {}",
+            "Database file not found: {}",
             classify_file.display()
         );
     }
 
-    // 加载 GCF 到完整分类信息的映射
+    // Load GCF-to-taxonomy mapping
     let gcf_to_classify = load_gcf_classify(&classify_file)?;
-    tracing::info!("已加载 {} 个基因组分类信息", gcf_to_classify.len());
+    tracing::info!("Loaded {} genome taxonomy records", gcf_to_classify.len());
 
-    // 创建输出目录
+    // Create output directory
     std::fs::create_dir_all(&args.output_dir)
-        .with_context(|| format!("无法创建输出目录: {}", args.output_dir.display()))?;
+        .with_context(|| format!("Cannot create output directory: {}", args.output_dir.display()))?;
 
-    // 读取样品列表
+    // Read sample list
     let samples = read_sample_list(&args.sample_list)?;
-    tracing::info!("共 {} 个样品需要处理", samples.len());
+    tracing::info!("{} samples to process", samples.len());
 
-    // 并行处理每个样品
-    // 使用 try_for_each 可以在出错时提前返回，或者使用 for_each 忽略错误
-    // 这里我们收集错误信息但尽量让其他任务跑完
+    // Process each sample in parallel.
+    // We collect errors but let other tasks finish.
     samples.par_iter().for_each(|sample_name| {
         match process_sample(
             sample_name,
@@ -93,27 +92,27 @@ pub fn run(args: FindGenomeArgs) -> Result<()> {
             args.gcf_threshold,
         ) {
             Ok(_) => {},
-            Err(e) => tracing::error!("样品 {} 处理失败: {}", sample_name, e),
+            Err(e) => tracing::error!("Sample {} processing failed: {}", sample_name, e),
         }
     });
 
-    tracing::info!("\n全部完成！");
+    tracing::info!("\nAll done!");
     Ok(())
 }
 
-/// 加载 GCF 到完整分类信息的映射
+/// Load GCF-to-taxonomy mapping
 fn load_gcf_classify(classify_file: &Path) -> Result<FxHashMap<String, String>> {
     let mut gcf_to_classify = FxHashMap::default();
 
     let file = File::open(classify_file)
-        .with_context(|| format!("无法打开数据库文件: {}", classify_file.display()))?;
+        .with_context(|| format!("Cannot open database file: {}", classify_file.display()))?;
     let decoder = GzDecoder::new(file);
     let reader = BufReader::new(decoder);
 
     for line in reader.lines() {
         let line = line?;
         let line = line.trim();
-        
+
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -130,17 +129,17 @@ fn load_gcf_classify(classify_file: &Path) -> Result<FxHashMap<String, String>> 
     Ok(gcf_to_classify)
 }
 
-/// 读取样品列表
+/// Read sample list
 fn read_sample_list(list_file: &Path) -> Result<Vec<String>> {
     let file = File::open(list_file)
-        .with_context(|| format!("无法打开样品列表: {}", list_file.display()))?;
+        .with_context(|| format!("Cannot open sample list: {}", list_file.display()))?;
     let reader = BufReader::new(file);
 
     let mut samples = Vec::new();
     for line in reader.lines() {
         let line = line?;
         let line = line.trim();
-        
+
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -156,7 +155,7 @@ fn read_sample_list(list_file: &Path) -> Result<Vec<String>> {
     Ok(samples)
 }
 
-/// 处理单个样品
+/// Process a single sample
 fn process_sample(
     sample_name: &str,
     qual_dir: &Path,
@@ -166,36 +165,36 @@ fn process_sample(
     g_score_threshold: i32,
     gcf_threshold: i32,
 ) -> Result<()> {
-    // 读取 combine.xls 文件，如果不存在则尝试使用单个酶的结果文件
+    // Read combine.xls; if absent, fall back to individual enzyme result files
     let combine_file = qual_dir.join(sample_name).join(format!("{}.combine.xls", sample_name));
-    
+
     let (enzymes, pass_gscore_classes) = if combine_file.exists() {
-        // 使用 combine.xls
+        // Use combine.xls
         parse_combine_file(&combine_file, g_score_threshold)?
     } else {
-        // 回退：扫描单个酶的结果文件
+        // Fallback: scan individual enzyme result files
         let sample_dir = qual_dir.join(sample_name);
         let mut found_enzymes = Vec::new();
         let mut found_classes = FxHashSet::default();
-        
-        // 扫描所有 {sample}.{enzyme}.xls 文件
+
+        // Scan all {sample}.{enzyme}.xls files
         if let Ok(entries) = std::fs::read_dir(&sample_dir) {
             for entry in entries {
                 let entry = entry?;
                 let path = entry.path();
                 if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                    // 匹配格式: {sample}.{enzyme}.xls，排除 GCF_detected.xls
-                    if file_name.ends_with(".xls") 
-                        && !file_name.contains("GCF_detected") 
+                    // Match format: {sample}.{enzyme}.xls, excluding GCF_detected.xls
+                    if file_name.ends_with(".xls")
+                        && !file_name.contains("GCF_detected")
                         && file_name.starts_with(&format!("{}.", sample_name)) {
-                        // 提取酶名：{sample}.{enzyme}.xls -> {enzyme}
+                        // Extract enzyme name: {sample}.{enzyme}.xls -> {enzyme}
                         let enzyme_part = file_name
                             .strip_prefix(&format!("{}.", sample_name))
                             .and_then(|s| s.strip_suffix(".xls"));
-                        
+
                         if let Some(enzyme) = enzyme_part {
                             found_enzymes.push(enzyme.to_string());
-                            // 解析该文件，提取通过 G-score 阈值的分类
+                            // Parse the file and extract taxa passing the G-score threshold
                             let (_, classes) = parse_single_enzyme_file(&path, g_score_threshold)?;
                             found_classes.extend(classes);
                         }
@@ -203,53 +202,53 @@ fn process_sample(
                 }
             }
         }
-        
+
         if found_enzymes.is_empty() {
             tracing::warn!(
-                "!!! {} 没有定性结果文件（combine.xls 或单个酶结果文件），跳过定量分析",
+                "!!! {} no qualitative result files (no combine.xls or individual enzyme result files), skipping quantification",
                 sample_name
             );
             return Ok(());
         }
-        
+
         (found_enzymes, found_classes)
     };
-    
+
     if enzymes.is_empty() {
-        tracing::warn!("警告: {} 未找到使用的酶", sample_name);
+        tracing::warn!("Warning: {} no enzymes found", sample_name);
         return Ok(());
     }
 
-    tracing::info!("样品 {}: 使用 {} 个酶，{} 个分类通过 G-score 阈值", 
+    tracing::info!("Sample {}: using {} enzymes, {} taxa pass G-score threshold",
              sample_name, enzymes.len(), pass_gscore_classes.len());
 
-    // 创建样品输出目录
+    // Create sample output directory
     let sample_output_dir = output_dir.join(sample_name);
     std::fs::create_dir_all(&sample_output_dir)?;
 
-    // 收集所有符合条件的基因组
+    // Collect all qualifying genomes
     let mut selected_genomes = FxHashSet::default();
 
-    // 遍历每个酶
+    // Iterate over each enzyme
     for enzyme in &enzymes {
-        // 检查数据库文件是否存在
+        // Check whether the database file exists
         let enzyme_db = database_dir.join(format!("{}.species.iibdb", enzyme));
         if !enzyme_db.exists() {
             tracing::warn!(
-                "警告: 数据库文件不存在: {}",
+                "Warning: Database file not found: {}",
                 enzyme_db.display()
             );
             continue;
         }
 
-        // 读取 GCF_detected.xls 文件
+        // Read GCF_detected.xls file
         let gcf_detected_file = qual_dir
             .join(sample_name)
             .join(format!("{}.{}.GCF_detected.xls", sample_name, enzyme));
 
         if !gcf_detected_file.exists() {
             tracing::warn!(
-                "警告: {} 没有 {} 的 GCF_detected.xls 文件: {}",
+                "Warning: {} no GCF_detected.xls for {}: {}",
                 sample_name,
                 enzyme,
                 gcf_detected_file.display()
@@ -257,7 +256,7 @@ fn process_sample(
             continue;
         }
 
-        // 解析 GCF_detected.xls
+        // Parse GCF_detected.xls
         let gcf_list = parse_gcf_detected_file(
             &gcf_detected_file,
             &pass_gscore_classes,
@@ -269,7 +268,7 @@ fn process_sample(
         }
     }
 
-    // 输出 sdb.list 文件（排序去重）
+    // Write sdb.list file (sort and deduplicate)
     let sdb_list_file = sample_output_dir.join("sdb.list");
     let mut writer = BufWriter::new(File::create(&sdb_list_file)?);
 
@@ -285,17 +284,17 @@ fn process_sample(
         writeln!(writer, "{}", genome_line)?;
     }
 
-    tracing::info!("样品 {}: 筛选出 {} 个基因组", sample_name, genome_count);
+    tracing::info!("Sample {}: Selected {} genomes", sample_name, genome_count);
     Ok(())
 }
 
-/// 解析 combine.xls 文件，提取使用的酶和通过 G-score 阈值的分类
+/// Parse combine.xls file, extracting the enzymes used and taxa passing the G-score threshold
 fn parse_combine_file(
     combine_file: &Path,
     g_score_threshold: i32,
 ) -> Result<(Vec<String>, FxHashSet<String>)> {
     let file = File::open(combine_file)
-        .with_context(|| format!("无法打开 combine 文件: {}", combine_file.display()))?;
+        .with_context(|| format!("Cannot open combine file: {}", combine_file.display()))?;
     let reader = BufReader::new(file);
 
     let mut enzymes = Vec::new();
@@ -309,12 +308,12 @@ fn parse_combine_file(
             continue;
         }
 
-        // 跳过表头行
+        // Skip header line
         if line.to_uppercase().starts_with("#KINGDOM") {
             continue;
         }
 
-        // 解析酶信息行（如 #BcgI CjeI combine）
+        // Parse enzyme info line (e.g. #BcgI CjeI combine)
         if line.starts_with('#') && !line.to_uppercase().starts_with("#KINGDOM") {
             let parts: Vec<&str> = line.trim_start_matches('#').split_whitespace().collect();
             for part in parts {
@@ -326,36 +325,36 @@ fn parse_combine_file(
             continue;
         }
 
-        // 解析数据行
+        // Parse data row
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() < 9 {
             continue;
         }
 
-        // 最后一列是 G_Score
+        // Last column is G_Score
         if let Ok(g_score) = parts[parts.len() - 1].parse::<f64>() {
             if g_score > g_score_threshold as f64 {
-                // 获取分类信息（前 N-8 列）
+                // Taxonomy info is the first N-8 columns
                 let class = parts[0..parts.len() - 8].join("\t");
                 pass_gscore_classes.insert(class);
             }
         }
     }
 
-    // 去重酶列表
+    // Deduplicate enzyme list
     enzymes.sort();
     enzymes.dedup();
 
     Ok((enzymes, pass_gscore_classes))
 }
 
-/// 解析单个酶的结果文件（格式与 combine.xls 类似，但没有酶信息行）
+/// Parse individual enzyme result file (same format as combine.xls but without an enzyme info line)
 fn parse_single_enzyme_file(
     enzyme_file: &Path,
     g_score_threshold: i32,
 ) -> Result<(Vec<String>, FxHashSet<String>)> {
     let file = File::open(enzyme_file)
-        .with_context(|| format!("无法打开酶结果文件: {}", enzyme_file.display()))?;
+        .with_context(|| format!("Cannot open enzyme result file: {}", enzyme_file.display()))?;
     let reader = BufReader::new(file);
 
     let mut pass_gscore_classes = FxHashSet::default();
@@ -368,44 +367,44 @@ fn parse_single_enzyme_file(
             continue;
         }
 
-        // 跳过表头行
+        // Skip header line
         if line.to_uppercase().starts_with("#KINGDOM") {
             continue;
         }
 
-        // 跳过注释行
+        // Skip comment line
         if line.starts_with('#') {
             continue;
         }
 
-        // 解析数据行
+        // Parse data row
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() < 9 {
             continue;
         }
 
-        // 最后一列是 G_Score
+        // Last column is G_Score
         if let Ok(g_score) = parts[parts.len() - 1].parse::<f64>() {
             if g_score > g_score_threshold as f64 {
-                // 获取分类信息（前 N-8 列）
+                // Taxonomy info is the first N-8 columns
                 let class = parts[0..parts.len() - 8].join("\t");
                 pass_gscore_classes.insert(class);
             }
         }
     }
 
-    // 单个酶文件不包含酶列表信息，返回空
+    // Single-enzyme files contain no enzyme list info; return empty
     Ok((Vec::new(), pass_gscore_classes))
 }
 
-/// 解析 GCF_detected.xls 文件，返回符合条件的 GCF 列表
+/// Parse GCF_detected.xls file and return qualifying GCF IDs
 fn parse_gcf_detected_file(
     gcf_detected_file: &Path,
     pass_gscore_classes: &FxHashSet<String>,
     gcf_threshold: i32,
 ) -> Result<Vec<String>> {
     let file = File::open(gcf_detected_file)
-        .with_context(|| format!("无法打开 GCF_detected 文件: {}", gcf_detected_file.display()))?;
+        .with_context(|| format!("Cannot open GCF_detected file: {}", gcf_detected_file.display()))?;
     let reader = BufReader::new(file);
 
     let mut gcf_list = Vec::new();
@@ -423,13 +422,13 @@ fn parse_gcf_detected_file(
             continue;
         }
 
-        // 格式: class\tGCF\tGCF_all_theory_num\tdetected_tag_num\tpercent
-        // 分类信息是前 N-4 列
+        // Format: class\tGCF\tGCF_all_theory_num\tdetected_tag_num\tpercent
+        // Taxonomy info is the first N-4 columns
         let class = parts[0..parts.len() - 4].join("\t");
         let gcf_id = parts[parts.len() - 4].to_string();
         let detected_tag_num: i32 = parts[parts.len() - 2].parse().unwrap_or(0);
 
-        // 检查分类是否通过 G-score 阈值，且检测到的标签数 > gcf_threshold
+        // Keep entries whose taxon passes the G-score threshold and whose detected tag count > gcf_threshold
         if pass_gscore_classes.contains(&class) && detected_tag_num > gcf_threshold {
             gcf_list.push(gcf_id);
         }

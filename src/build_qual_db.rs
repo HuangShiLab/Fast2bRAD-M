@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use std::hash::Hasher;
 use std::sync::mpsc;
 use std::thread;
-use std::io::{BufWriter, Write}; // 引入 BufWriter
+use std::io::{BufWriter, Write}; // Import BufWriter
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-// 移除 flate2 引用
+// Remove flate2 imports
 // use flate2::write::GzEncoder;
 // use flate2::Compression;
 use fxhash::{FxHashMap, FxHashSet, FxHasher};
@@ -41,7 +41,7 @@ fn get_canonical_sequence(seq: &[u8]) -> Vec<u8> {
             b'C' | b'c' => b'G',
             b'G' | b'g' => b'C',
             b'N' | b'n' => b'N',
-            x => x, 
+            x => x,
         };
         rc.push(complement);
     }
@@ -118,47 +118,47 @@ pub fn run(args: BuildQualDbArgs) -> Result<()> {
     let remove_redundant = args.remove_redundant.eq_ignore_ascii_case("yes");
 
     io_utils::ensure_directory(&args.output_dir)?;
-    tracing::info!("读取基因组分类列表 ...");
+    tracing::info!("Reading genome taxonomy list ...");
     let genomes = read_genome_list(&args.genome_list)?;
-    tracing::info!("共 {} 个基因组", genomes.len());
+    tracing::info!("Total {} genomes", genomes.len());
 
     let enzyme_file = if let Some(ref file) = args.enzyme_file {
-        tracing::info!("使用预酶切文件：{}", file.display());
+        tracing::info!("Using pre-digested file: {}", file.display());
         file.clone()
     } else if let Some(ref dir) = args.pre_digested_dir {
-        tracing::info!("从预酶切目录并行合并文件：{}", dir.display());
+        tracing::info!("Merging pre-digested files from directory in parallel: {}", dir.display());
         let output_file = args.output_dir.join(format!("{}.enzyme.iibdb", enzyme.name));
         merge_pre_digested_files(&genomes, enzyme, dir, &output_file)?;
         output_file
     } else {
-        tracing::info!("开始批量酶切基因组并生成 Hash (Parallel Binary) ...");
+        tracing::info!("Digesting genomes and generating hashes (Parallel Binary) ...");
         let output_file = args.output_dir.join(format!("{}.enzyme.iibdb", enzyme.name));
         digest_genomes(&genomes, enzyme, &output_file)?;
         output_file
     };
 
     for level in &levels {
-        tracing::info!("\n========== 构建 {} 级别数据库 (Hash模式) ==========", level.name());
+        tracing::info!("\n========== Building {}-level database (Hash mode) ==========", level.name());
         build_database_for_level(&enzyme_file, enzyme, &args.output_dir, *level, &genomes, remove_redundant)?;
     }
-    tracing::info!("\n全部完成！");
+    tracing::info!("\nAll done!");
     Ok(())
 }
 
 fn parse_enzyme(site: &str) -> Result<&'static Enzyme> {
     if let Some(enzyme) = enzyme_by_name(site) { return Ok(enzyme); }
     if let Ok(id) = site.parse::<u8>() { if let Some(enzyme) = enzyme_by_id(id) { return Ok(enzyme); } }
-    bail!("未知的酶：{}", site)
+    bail!("Unknown enzyme: {}", site)
 }
 
 fn parse_taxonomy_levels(levels_str: &str) -> Result<Vec<TaxonomyLevel>> {
     if levels_str.eq_ignore_ascii_case("all") { return Ok(TaxonomyLevel::all_levels()); }
     let mut levels = Vec::new();
     for part in levels_str.split(',') {
-        let level = TaxonomyLevel::from_str(part.trim()).ok_or_else(|| anyhow::anyhow!("无效的分类水平：{}", part))?;
+        let level = TaxonomyLevel::from_str(part.trim()).ok_or_else(|| anyhow::anyhow!("Invalid taxonomy level: {}", part))?;
         levels.push(level);
     }
-    if levels.is_empty() { bail!("至少需要指定一个分类水平"); }
+    if levels.is_empty() { bail!("At least one taxonomy level must be specified"); }
     Ok(levels)
 }
 
@@ -217,24 +217,24 @@ fn parse_gtdb_taxonomy(gtdb_str: &str) -> Result<Vec<String>> {
 fn merge_pre_digested_files(genomes: &[GenomeRecord], enzyme: &'static Enzyme, pre_digested_dir: &Path, output_file: &Path) -> Result<()> {
     let (sender, receiver) = mpsc::channel::<Vec<WriteTask>>();
     let output_file_buf = output_file.to_path_buf();
-    
+
     let writer_thread = thread::spawn(move || -> Result<()> {
         let file = File::create(&output_file_buf)?;
-        // 【修正】使用 BufWriter 替代 GzEncoder，生成无压缩二进制文件
+        // Fix: Use BufWriter instead of GzEncoder to produce an uncompressed binary file
         let mut writer = BufWriter::with_capacity(io_utils::IO_BUFFER_SIZE, file);
-        while let Ok(tasks) = receiver.recv() { 
-            for task in tasks { 
-                io_utils::write_binary_record(&mut writer, task.hash, &task.id)?; 
-            } 
+        while let Ok(tasks) = receiver.recv() {
+            for task in tasks {
+                io_utils::write_binary_record(&mut writer, task.hash, &task.id)?;
+            }
         }
-        writer.flush()?; // 确保数据写入
+        writer.flush()?; // Ensure data is flushed
         Ok(())
     });
-    
+
     let pb = ProgressBar::new(genomes.len() as u64);
     genomes.par_iter().for_each_with(sender, |s, genome| {
         let genome_id = genome.gcf_id.split('.').take(2).collect::<Vec<_>>().join(".");
-        // 这里可以保留兼容性，先找 .iibdb
+        // Retain compatibility: check for .iibdb first
         let patterns = [format!("{}.{}.iibdb", genome_id, enzyme.name), format!("{}.{}.iibdb", genome.gcf_id, enzyme.name), format!("{}.{}.iibsp", genome_id, enzyme.name)];
         for pattern in &patterns {
             let test_path = pre_digested_dir.join(pattern);
@@ -265,20 +265,20 @@ fn read_binary_content(file_path: &Path, gcf_id: &str) -> Result<Vec<WriteTask>>
 fn digest_genomes(genomes: &[GenomeRecord], enzyme: &'static Enzyme, output_file: &Path) -> Result<()> {
     let (sender, receiver) = mpsc::channel::<Vec<WriteTask>>();
     let output_file_buf = output_file.to_path_buf();
-    
+
     let writer_thread = thread::spawn(move || -> Result<()> {
         let file = File::create(&output_file_buf)?;
-        // 【修正】使用 BufWriter，无压缩
+        // Fix: Use BufWriter, no compression
         let mut writer = BufWriter::with_capacity(io_utils::IO_BUFFER_SIZE, file);
-        while let Ok(tasks) = receiver.recv() { 
-            for task in tasks { 
-                io_utils::write_binary_record(&mut writer, task.hash, &task.id)?; 
-            } 
+        while let Ok(tasks) = receiver.recv() {
+            for task in tasks {
+                io_utils::write_binary_record(&mut writer, task.hash, &task.id)?;
+            }
         }
         writer.flush()?;
         Ok(())
     });
-    
+
     let pb = ProgressBar::new(genomes.len() as u64);
     genomes.par_iter().for_each_with(sender, |s, genome| {
         if let Some(genome_path) = &genome.genome_path {
@@ -321,15 +321,15 @@ fn build_database_for_level(
     genomes: &[GenomeRecord],
     remove_redundant: bool,
 ) -> Result<()> {
-    tracing::info!("第 1 步：统计标签分类信息 ...");
+    tracing::info!("Step 1: Collecting tag taxonomy information ...");
     let mut gcf_to_taxonomy = FxHashMap::default();
     for genome in genomes {
-        if level as usize > genome.taxonomy.len() { bail!("分类层级超出范围"); }
+        if level as usize > genome.taxonomy.len() { bail!("Taxonomy level index out of range"); }
         let taxonomy_str = genome.taxonomy[0..level as usize].join("\t");
         gcf_to_taxonomy.insert(genome.gcf_id.clone(), taxonomy_str);
     }
     let (tag_taxonomy, genome_tags) = collect_tag_taxonomy(enzyme_file, &gcf_to_taxonomy, remove_redundant)?;
-    tracing::info!("第 2 步：识别特异性标签并输出数据库 ...");
+    tracing::info!("Step 2: Identifying unique tags and writing database ...");
     output_database(enzyme, enzyme_file, level, &tag_taxonomy, &genome_tags, remove_redundant, output_dir)?;
     Ok(())
 }
@@ -346,16 +346,16 @@ fn collect_tag_taxonomy(
     let mut tag_taxonomy: TagTaxonomyMap = FxHashMap::default();
     let mut genome_tags: GenomeTagCountMap = FxHashMap::default();
     let mut reader = io_utils::open_binary_reader(enzyme_file)?;
-    
+
     let mut id_buffer = String::with_capacity(256);
 
     while let Some(hash_val) = reader.next_record_reuse(&mut id_buffer)? {
         let mut parts = id_buffer.split('|');
         let gcf_id = parts.next().unwrap_or("");
-        
+
         if gcf_id.is_empty() { continue; }
         if !gcf_to_taxonomy.contains_key(gcf_id) { continue; }
-        
+
         let taxonomy = gcf_to_taxonomy.get(gcf_id).unwrap();
         tag_taxonomy.entry(hash_val).or_insert_with(FxHashSet::default).insert(taxonomy.clone());
 
@@ -377,7 +377,7 @@ fn output_database(
 ) -> Result<()> {
     let output_path = output_dir.join(format!("{}.{}.iibdb", enzyme.name, level.name()));
     let file = File::create(&output_path)?;
-    // 【修正】使用 BufWriter，无压缩
+    // Fix: Use BufWriter, no compression
     let mut writer = BufWriter::with_capacity(io_utils::IO_BUFFER_SIZE, file);
 
     let mut reader = io_utils::open_binary_reader(enzyme_file)?;
@@ -412,8 +412,8 @@ fn output_database(
         }
     }
     writer.flush()?;
-    
-    tracing::info!("  输出数据库：{}", output_path.display());
-    tracing::info!("  包含 {} 个基因组的特异性标签", unique_counts.len());
+
+    tracing::info!("  Output database: {}", output_path.display());
+    tracing::info!("  Contains unique tags for {} genomes", unique_counts.len());
     Ok(())
 }

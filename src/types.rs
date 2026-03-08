@@ -16,17 +16,15 @@ impl DigestStats {
     }
 }
 
-/// 输入数据类型
+/// Input data type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputType {
-    /// Type 1: 参考基因组 FASTA
+    /// Type 1: Reference genome FASTA
     ReferenceGenome = 1,
-    /// Type 2: Shotgun 测序数据（SE/PE）
+    /// Type 2: Shotgun sequencing data (SE/PE)
     ShotgunMetagenome = 2,
-    /// Type 3: 单条 2bRAD 标签（SE/PE，只取第一个匹配）
+    /// Type 3: Single 2bRAD tag (SE/PE, take only the first match)
     Single2bRAD = 3,
-    /// Type 4: 5 个连接的 2bRAD 标签（PE，按固定位置切分）
-    Concatenated2bRAD = 4,
 }
 
 impl InputType {
@@ -35,24 +33,23 @@ impl InputType {
             1 => Some(InputType::ReferenceGenome),
             2 => Some(InputType::ShotgunMetagenome),
             3 => Some(InputType::Single2bRAD),
-            4 => Some(InputType::Concatenated2bRAD),
             _ => None,
         }
     }
 }
 
-/// 质量控制配置
+/// Quality control configuration
 #[derive(Debug, Clone)]
 pub struct QualityControl {
-    /// 是否启用质量控制
+    /// Whether quality control is enabled
     pub enabled: bool,
-    /// 最大 N 比例（0.0-1.0 表示百分比，>=1.0 表示绝对数量）
+    /// Maximum N ratio (0.0–1.0 for fraction, >=1.0 for absolute count)
     pub max_n: f64,
-    /// 最低质量分数
+    /// Minimum quality score
     pub min_quality: u8,
-    /// 最低质量百分比（0-100）
+    /// Minimum quality percentage (0–100)
     pub min_quality_percent: u8,
-    /// 质量分数编码类型（通常是 33 或 64）
+    /// Quality score encoding base (typically 33 or 64)
     pub quality_base: u8,
 }
 
@@ -69,7 +66,7 @@ impl Default for QualityControl {
 }
 
 impl QualityControl {
-    /// 检查序列中 N 的比例是否满足要求
+    /// Check whether the N ratio in a sequence satisfies the threshold
     pub fn check_n(&self, sequence: &[u8]) -> bool {
         if !self.enabled {
             return true;
@@ -78,16 +75,16 @@ impl QualityControl {
         let n_count = sequence.iter().filter(|&&b| b == b'N').count();
 
         if self.max_n > 0.0 && self.max_n < 1.0 {
-            // 百分比模式
+            // Fraction mode
             let ratio = n_count as f64 / sequence.len() as f64;
             ratio <= self.max_n
         } else {
-            // 绝对数量模式
+            // Absolute count mode
             (n_count as f64) <= self.max_n
         }
     }
 
-    /// 检查质量分数是否满足要求
+    /// Check whether the quality scores satisfy the threshold
     pub fn check_quality(&self, quality: &[u8]) -> bool {
         if !self.enabled {
             return true;

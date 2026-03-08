@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result, anyhow};
 use clap::Parser;
 use fxhash::FxHashMap;
-use rayon::prelude::*; 
+use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -32,10 +32,10 @@ pub struct QuantifyArgs {
 
 #[derive(Debug, Default)]
 struct AbundanceStats {
-    theoretical_tag_num: f64,    
-    sequenced_tag_num: usize,    
-    sequenced_reads_num: usize,  
-    sequenced_tag_num_gt1: usize, 
+    theoretical_tag_num: f64,
+    sequenced_tag_num: usize,
+    sequenced_reads_num: usize,
+    sequenced_tag_num_gt1: usize,
 }
 
 impl AbundanceStats {
@@ -57,44 +57,44 @@ pub fn run(args: QuantifyArgs) -> Result<()> {
     let _ = rayon::ThreadPoolBuilder::new().num_threads(args.threads).build_global();
     let verbose = args.verbose.to_lowercase() == "yes";
     let enzyme = if let Ok(site_num) = args.enzyme_site.parse::<u8>() {
-        enzyme_by_id(site_num).ok_or_else(|| anyhow!("无效的酶切位点编号"))?
+        enzyme_by_id(site_num).ok_or_else(|| anyhow!("Invalid enzyme site ID"))?
     } else {
-        enzyme_by_name(&args.enzyme_site).ok_or_else(|| anyhow!("无效的酶名称"))?
+        enzyme_by_name(&args.enzyme_site).ok_or_else(|| anyhow!("Invalid enzyme name"))?
     };
     let tax_level = validate_taxonomy_level(&args.taxonomy_level)?;
 
     tracing::info!("COMMAND: quantify -l {} -d {} -t {} -s {} -o {} -g {} -v {} -j {}", args.sample_list.display(), args.database_dir.display(), args.taxonomy_level, args.enzyme_site, args.output_dir.display(), args.g_score_threshold, args.verbose, args.threads);
 
     std::fs::create_dir_all(&args.output_dir)?;
-    // 【修改】读取 .iibdb 后缀
+    // [update] read .iibdb suffix
     let db_file = args.database_dir.join(format!("{}.{}.iibdb", enzyme.name, tax_level));
     let classify_file = args.database_dir.join("abfh_classify_with_speciename.txt.gz");
 
-    if !db_file.exists() { bail!("数据库文件不存在"); }
-    if !classify_file.exists() { bail!("分类文件不存在"); }
+    if !db_file.exists() { bail!("Database file not found"); }
+    if !classify_file.exists() { bail!("Taxonomy file not found"); }
 
-    tracing::info!("### 加载数据库：{}", db_file.display());
+    tracing::info!("### Loading database: {}", db_file.display());
     let (tag_to_gcfs, gcf_to_taxonomy, tag_theory_num) = load_database(&db_file, &classify_file, &args.taxonomy_level)?;
-    tracing::info!("### 数据库加载完成");
+    tracing::info!("### Database loaded");
 
     let samples = read_sample_list(&args.sample_list)?;
-    tracing::info!("共 {} 个样品待处理", samples.len());
+    tracing::info!("{} samples to process", samples.len());
 
     samples.par_iter().for_each(|(sample_name, sample_data)| {
-        tracing::info!(">>> ({}) 样品分析开始", sample_name);
+        tracing::info!(">>> ({}) Sample analysis started", sample_name);
         let result = process_sample(sample_name, sample_data, &tag_to_gcfs, &gcf_to_taxonomy, &tag_theory_num, enzyme, &args.output_dir, args.g_score_threshold, verbose);
         match result {
-            Ok(_) => tracing::info!("<<< ({}) 样品分析完成", sample_name),
-            Err(e) => tracing::error!("!!! ({}) 错误: {}", sample_name, e),
+            Ok(_) => tracing::info!("<<< ({}) Sample analysis completed", sample_name),
+            Err(e) => tracing::error!("!!! ({}) Error: {}", sample_name, e),
         }
     });
-    tracing::info!("\n全部完成！");
+    tracing::info!("\nAll done!");
     Ok(())
 }
 
 fn validate_taxonomy_level(level: &str) -> Result<String> {
     let valid = ["kingdom", "phylum", "class", "order", "family", "genus", "species", "strain"];
-    if valid.contains(&level) { Ok(level.to_string()) } else { bail!("无效的分类层级"); }
+    if valid.contains(&level) { Ok(level.to_string()) } else { bail!("Invalid taxonomy level"); }
 }
 
 fn read_sample_list(list_path: &Path) -> Result<Vec<(String, PathBuf)>> {
@@ -106,7 +106,7 @@ fn read_sample_list(list_path: &Path) -> Result<Vec<(String, PathBuf)>> {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() < 2 { continue; }
         let sample_path = PathBuf::from(parts[1]);
-        if !sample_path.exists() { tracing::warn!("警告: 样品文件不存在: {}", sample_path.display()); continue; }
+        if !sample_path.exists() { tracing::warn!("Warning: sample file not found: {}", sample_path.display()); continue; }
         samples.push((parts[0].to_string(), sample_path));
     }
     Ok(samples)
@@ -115,7 +115,7 @@ fn read_sample_list(list_path: &Path) -> Result<Vec<(String, PathBuf)>> {
 fn load_database(db_file: &Path, classify_file: &Path, tax_level: &str) -> Result<(FxHashMap<u64, Vec<String>>, FxHashMap<String, String>, FxHashMap<String, FxHashMap<String, FxHashMap<u64, usize>>>)> {
     let level_index = get_taxonomy_level_index(tax_level);
     let mut gcf_to_taxonomy: FxHashMap<String, String> = FxHashMap::default();
-    
+
     let content = if classify_file.to_str().unwrap().ends_with(".gz") {
         use flate2::read::GzDecoder; use std::io::Read;
         let file = File::open(classify_file)?;
@@ -136,15 +136,15 @@ fn load_database(db_file: &Path, classify_file: &Path, tax_level: &str) -> Resul
     let mut tag_to_gcfs: FxHashMap<u64, Vec<String>> = FxHashMap::default();
     let mut tag_theory_num: FxHashMap<String, FxHashMap<String, FxHashMap<u64, usize>>> = FxHashMap::default();
     let mut reader = io_utils::open_binary_reader(db_file)?;
-    let mut id_buffer = String::with_capacity(256); // 复用
+    let mut id_buffer = String::with_capacity(256); // reuse
     let mut loaded_count = 0usize;
 
     while let Some(hash_val) = reader.next_record_reuse(&mut id_buffer)? {
         let mut parts = id_buffer.split('|');
         let gcf_id = parts.next().unwrap_or("");
-        // 跳过 index, scaffold, pos, strand (4个)
+        // skip index, scaffold, pos, strand (4 fields)
         let unique_flag = parts.nth(4).unwrap_or("0");
-        // 兼容旧格式 ("-") 和新格式 ("1")
+        // compatible with old format ("-") and new format ("1")
         if unique_flag != "1" && unique_flag != "-" { continue; }
         if gcf_id.is_empty() { continue; }
 
@@ -156,7 +156,7 @@ fn load_database(db_file: &Path, classify_file: &Path, tax_level: &str) -> Resul
             loaded_count += 1;
         }
     }
-    tracing::info!("成功从数据库加载了 {} 个有效唯一标签条目", loaded_count);
+    tracing::info!("Successfully loaded {} valid unique tag entries from database", loaded_count);
     Ok((tag_to_gcfs, gcf_to_taxonomy, tag_theory_num))
 }
 
@@ -178,7 +178,7 @@ fn process_sample(
     let mut tag_num: FxHashMap<String, FxHashMap<u64, usize>> = FxHashMap::default();
     let mut detected_gcf_tag: FxHashMap<String, FxHashMap<String, fxhash::FxHashSet<u64>>> = FxHashMap::default();
     let mut reader = io_utils::open_binary_reader(sample_data)?;
-    let mut ignored_id_buf = String::with_capacity(128); // 复用
+    let mut ignored_id_buf = String::with_capacity(128); // reuse
 
     while let Some(tag_hash) = reader.next_record_reuse(&mut ignored_id_buf)? {
         if let Some(gcf_list) = tag_to_gcfs.get(&tag_hash) {
@@ -194,16 +194,16 @@ fn process_sample(
         }
     }
 
-    if tag_num.is_empty() { tracing::warn!("!!! ({}) 警告: 未检测到标签", sample_name); return Ok(()); }
+    if tag_num.is_empty() { tracing::warn!("!!! ({}) Warning: no tags detected", sample_name); return Ok(()); }
 
     let sample_dir = output_dir.join(sample_name);
     std::fs::create_dir_all(&sample_dir)?;
     let gcf_detected_file = sample_dir.join(format!("{}.{}.GCF_detected.xls", sample_name, enzyme.name));
     let mut gcf_writer = BufWriter::new(File::create(&gcf_detected_file)?);
-    
+
     let mut taxonomy_list: Vec<&String> = detected_gcf_tag.keys().collect();
     taxonomy_list.sort();
-    
+
     for taxonomy in taxonomy_list {
         let gcf_map = &detected_gcf_tag[taxonomy];
         let mut gcf_list: Vec<&String> = gcf_map.keys().collect();
