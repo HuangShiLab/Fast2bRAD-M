@@ -1,332 +1,568 @@
-# fast2bRAD-M
+# Fast2bRAD-M
 
-高性能 Rust 版 2bRAD-M 微生物组分析工具
+**Fast2bRAD-M** is a high-performance Rust reimplementation of the [2bRAD-M](https://github.com/HuangShiLab/2bRAD-M) microbiome profiling pipeline. It delivers the same analytical results as the original Perl/Shell pipeline while achieving dramatically higher throughput through native parallelism and optimized I/O.
 
-## 特性
+---
 
-- ⚡ **极致性能**：Rust 实现 + Rayon 多核并行，批量处理 15 个基因组 < 0.12 秒
-- 🚀 **批量并行**：自动利用所有 CPU 核心，显著加速大规模数据处理
-- 🧬 **完整酶支持**：支持全部 16 种 Type IIB 限制酶
-- 📊 **全部输入类型**：参考基因组、Shotgun、单标签
-- 🔬 **质量控制**：N 比例、质量分数、质量百分比检查
-- 💾 **灵活输出**：FASTA/FASTQ 格式、gzip 压缩
+## Table of Contents
 
-## 安装 
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Pipeline Overview](#pipeline-overview)
+- [Subcommands](#subcommands)
+  - [extract](#extract)
+  - [build-qual-db](#build-qual-db)
+  - [build-quan-db](#build-quan-db)
+  - [quantify](#quantify)
+  - [find-genome](#find-genome)
+  - [merge](#merge)
+  - [predict](#predict)
+  - [pipeline](#pipeline)
+- [File Formats](#file-formats)
+- [Supported Enzymes](#supported-enzymes)
+- [Output Directory Structure](#output-directory-structure)
+- [License](#license)
 
-### 方式一：使用 Conda 环境（推荐）
+---
 
-使用提供的 conda 环境配置文件快速搭建环境：
+## Features
+
+- **High Performance** — Rust implementation with Rayon multi-core parallelism; batch-digesting 15 reference genomes in < 0.12 s
+- **Full Enzyme Support** — All 16 Type IIB restriction enzymes (BcgI, CspCI, AloI, BsaXI, BaeI, CjeI, PpiI, PsrI, BplI, FalI, Bsp24I, HaeIV, CjePI, Hin4I, AlfI, BslFI)
+- **All Input Types** — Reference genomes, Shotgun metagenomic reads (SE/PE), single 2bRAD tags, and 5-concatenated tags
+- **Built-in QC** — N-ratio, minimum quality score, and minimum quality-percent filtering
+- **Functional Prediction** — Matrix-multiplication-based functional abundance profiling (KO, KEGG, etc.)
+- **Resume Support** — `.done` marker files allow interrupted runs to be resumed without re-computation
+- **One-Command Pipeline** — The `pipeline` subcommand chains all steps automatically
+
+---
+
+## Installation
+
+### Option 1 — Conda (Recommended)
 
 ```bash
-conda env create -f fast2bRAD-M/fast2brad_m_conda.yaml -n fast2brad
+conda env create -f fast2brad_m_conda.yaml -n fast2brad
 conda activate fast2brad
-cd fast2bRAD-M
 cargo build --release
 ```
 
-环境包含：
-- Rust 编译工具链
-- zlib、openssl（依赖库）
+### Option 2 — Direct Compilation
 
-### 方式二：直接编译
+Prerequisites: [Rust toolchain](https://rustup.rs/) ≥ 1.70
 
 ```bash
-cd fast2bRAD-M
+git clone https://github.com/HuangShiLab/Fast2bRAD-M.git
+cd Fast2bRAD-M
 cargo build --release
+# Binary: target/release/fast2bRAD-M
 ```
 
-**注意**：如果使用 Type 2 双端数据或 Type 4 功能，需要单独安装 PEAR：
-```bash
-conda install -c bioconda pear
-```
+> **Note**: Paired-end PEAR merging (optional) requires PEAR to be installed separately:
+> ```bash
+> conda install -c bioconda pear
+> ```
 
-## 使用
+---
 
-### pipeline - 一键主流程（对齐 Perl 管线）
-
-将 Perl 的 `2bRADM_Pipline.pl` 流程一键化，串联：
-extract → （可选）build-qual-db → （可选）build-quan-db → quantify → merge  
-产物目录结构：`01_extract/ 02_db_qual/ 04_quantify/ 05_merge/ qualitative/ quantitative_sdb/`
+## Quick Start
 
 ```bash
-# 全流程（含数据库构建）：
+# One-command full pipeline (database construction + sample profiling)
 fast2bRAD-M pipeline \
   --mode full \
-  --samples /abs/samples_list.tsv \
-  --taxonomy /abs/abfh_classify_with_speciename.txt \
-  --pre-digested-dir /abs/pre_digested_output \
+  --samples samples.tsv \
+  --genome-list genome_list.tsv \
+  --taxonomy taxonomy.tsv \
   --site BcgI \
   --level species \
-  --outdir /abs/outdir \
-  --prefix run \
-  --gscore 5 \
-  --threads 4 \
-  --pc 8\
-  --min-qual 15 \
+  --outdir results/ \
+  --prefix my_run \
+  --threads 16 \
   --resume yes
 
-# 数据库构建：
-fast2bRAD-M extract \
-  --genome-list /abs/pre_digested_file_list.tsv \
-  -t 1 \
-  -s BcgI \
-  --od /abs/pre_digested_output \
-  --op db \
-  --threads 5 \
-  --qc yes \
-  -n 0.08 \
-  -q 30 \
-  -p 80
+# With functional prediction
+fast2bRAD-M pipeline \
+  --mode full \
+  --samples samples.tsv \
+  --taxonomy taxonomy.tsv \
+  --site BcgI \
+  --level species \
+  --outdir results/ \
+  --prefix my_run \
+  --threads 16 \
+  --ko-mapping ko_mapping.tsv
+```
 
+---
+
+## Pipeline Overview
+
+The full analysis pipeline runs in five main stages:
+
+```
+Raw reads (FASTQ)
+      │
+      ▼
+[1] extract          →  01_extract/{sample}.BcgI.iibsp
+      │
+      ▼
+[2] build-qual-db    →  02_db_qual/  (qualitative database, shared)
+      │
+      ▼
+[3] quantify (qual)  →  qualitative/{sample}/  (qualitative screen)
+      │
+      ▼
+[4] find-genome      →  quantitative_sdb/{sample}/sdb.list
+      │
+      ▼
+[5] build-quan-db  } →  02_db_quan/{sample}/  (per-sample quantitative DB)
+    quantify (quan) } →  04_quantify/{sample}/
+      │
+      ▼
+[6] merge            →  05_merge/{prefix}.all.xls
+      │
+      ▼ (optional, requires --ko-mapping)
+[7] predict          →  05_merge/{prefix}.func.xls
+```
+
+---
+
+## Subcommands
+
+### `extract`
+
+Digest input sequences with a Type IIB restriction enzyme and extract 2bRAD tags.
+
+```bash
+fast2bRAD-M extract \
+  --genome-list sample_list.tsv \  # batch mode
+  -t 2 \                           # input type (1=reference, 2=shotgun, 3=single tag)
+  -s BcgI \                        # enzyme name or ID (1–16)
+  --od output_dir/ \
+  --op sample_prefix \
+  -j 8 \                           # threads
+  --qc yes \                       # quality control
+  -n 0.08 \                        # max N ratio
+  -q 30 \                          # min quality score
+  -p 80                            # min quality percent
+```
+
+**Input types**:
+
+| Type | Description |
+|------|-------------|
+| 1    | Reference genome FASTA (for database construction) |
+| 2    | Shotgun metagenome reads (SE or PE; PE can use PEAR merging) |
+| 3    | Single 2bRAD tag reads |
+| 4    | 5-concatenated 2bRAD tag reads |
+
+**Output**:
+- `{prefix}.{enzyme}.iibsp` — Binary tag file for sample reads
+- `{prefix}.{enzyme}.iibdb` — Binary tag file for reference genomes
+- `{prefix}.{enzyme}.stat.tsv` — Digest statistics
+
+**Paired-end with PEAR merging** (optional):
+```bash
+fast2bRAD-M extract \
+  -i sample_R1.fq.gz sample_R2.fq.gz \
+  -t 2 -s BcgI \
+  --od output/ --op sample1 \
+  --use-pear yes --pe pear --pc 4
+```
+
+---
+
+### `build-qual-db`
+
+Build a qualitative (classification-specificity) database from reference genomes.
+
+```bash
+fast2bRAD-M build-qual-db \
+  -l genome_list.tsv \   # genome list with taxonomy
+  -s BcgI \              # enzyme
+  -t species \           # taxonomy level(s); comma-separated or "all"
+  -o db_qual/ \
+  --pre-digested-dir pre_digested/ \  # optional: pre-digested .iibdb files
+  -r yes \               # remove redundant tags
+  -j 8
+```
+
+**Genome list format** (Tab-separated):
+```
+GCF_000007445.1  Bacteria  Proteobacteria  Gammaproteobacteria  Enterobacterales  Enterobacteriaceae  Escherichia  Escherichia_coli  str.K-12  /path/to/genome.fna.gz
+```
+Or GTDB format (second column = `d__Bacteria;p__Proteobacteria;...`).
+
+**Output** (per taxonomy level):
+- `{enzyme}.enzyme.iibdb` — All tags from all genomes (intermediate)
+- `{enzyme}.{level}.iibdb` — Taxon-unique tags only
+- `abfh_classify_with_speciename.txt.gz` — GCF-to-taxonomy mapping
+
+---
+
+### `build-quan-db`
+
+Build a quantitative (per-sample) database that retains only unique tags.
+
+```bash
+fast2bRAD-M build-quan-db \
+  -l sdb.list \           # genome list for this sample (from find-genome)
+  -s BcgI \
+  -t species \
+  -o sample_db/ \
+  -e qual_db/BcgI.enzyme.iibdb \  # reuse the enzyme file from qual DB
+  -j 4
+```
+
+**Output**:
+- `BcgI.species.iibdb` — Unique tags for quantitative profiling
+- `abfh_classify_with_speciename.txt.gz` — Taxonomy mapping
+
+---
+
+### `quantify`
+
+Calculate per-taxon relative abundance for one or more samples.
+
+```bash
+fast2bRAD-M quantify \
+  -l sample_list.tsv \   # sample_name<TAB>path_to.iibsp
+  -d database_dir/ \     # directory with BcgI.species.iibdb + classify file
+  -t species \
+  -s BcgI \
+  -o quantify_out/ \
+  -g 5.0 \               # G-score threshold (species with G < threshold excluded)
+  -v yes \               # verbose: output per-tag detail files
+  -j 8
+```
+
+**G-score** = `sqrt(sequenced_tag_num × sequenced_reads_num)` — a combined measure of breadth and depth of coverage.
+
+**Output** per sample (inside `output_dir/{sample}/`):
+- `{sample}.{enzyme}.xls` — Per-taxon abundance table with statistics
+- `{sample}.{enzyme}.GCF_detected.xls` — Per-genome detection details
+
+**Abundance table columns**:
+```
+Kingdom  Phylum  Class  Order  Family  Genus  Species
+Theoretical_Tag_Num  Sequenced_Tag_Num  Percent
+Sequenced_Reads_Num  Reads/Theoretical  Reads/Sequenced
+Sequenced_Tag_Num(depth>1)  G_Score
+```
+
+---
+
+### `find-genome`
+
+Filter reference genomes for quantitative analysis based on qualitative results.
+This step converts broad qualitative detections into a per-sample genome list.
+
+```bash
+fast2bRAD-M find-genome \
+  -l samples.tsv \
+  -d qual_db/ \
+  -o quantitative_sdb/ \
+  --qual-dir qualitative/ \
+  --gscore 5 \     # G-score threshold for qualitative detection
+  --gcf 1 \        # minimum detected tags per GCF
+  -j 8
+```
+
+**Output** per sample: `quantitative_sdb/{sample}/sdb.list` — tab-separated genome records that pass thresholds.
+
+---
+
+### `merge`
+
+Merge per-sample quantitative results into a combined abundance table.
+
+```bash
+fast2bRAD-M merge \
+  -l merge_list.tsv \   # sample_name<TAB>path_to_{sample}.{enzyme}.xls
+  -o merge_out/ \
+  -p Abundance_Stat \   # output file prefix
+  --mock mock1,mock2 \  # comma-separated mock sample names (filtered out)
+  --control ctrl1       # comma-separated negative control names
+```
+
+**Output**:
+- `{prefix}.all.xls` — Merged relative abundance matrix (all samples)
+- `{prefix}.filtered.xls` — Same, with mock/control samples and contamination taxa removed
+
+**Merge table format**:
+```
+Kingdom  Phylum  Class  Order  Family  Genus  Species  sample1  sample2  ...
+Bacteria  Proteobacteria  ...  Escherichia_coli  0.3413  0.2841  ...
+```
+Values are relative abundances normalized to sum to 1.0 per sample.
+
+---
+
+### `predict`
+
+Predict functional abundance by multiplying the species abundance matrix with a species-to-function mapping matrix.
+
+**Formula**: `Functional_abundance = t(Species_abundance) × Mapping_matrix`
+
+```bash
+fast2bRAD-M predict \
+  -a 05_merge/Abundance_Stat.all.xls \   # merged species abundance table
+  -m ko_mapping.tsv \                    # species-to-KO mapping matrix
+  -o 05_merge/ \
+  -p Abundance_Stat
+```
+
+**Mapping matrix format** (TSV):
+```
+#Species         KO00001  KO00002  KO00003  ...
+Escherichia_coli   5        0        3       ...
+Cutibacterium_acnes 2       8        0       ...
+```
+- First column: species name (must match the Species column in the abundance table)
+- Remaining columns: KO/functional IDs; values = gene copy counts
+
+**Output**:
+- `{prefix}.func.xls` — Functional abundance table, per-sample normalized (each sample sums to 1.0)
+
+```
+#Function  sample1     sample2     ...
+KO00001    0.12345678  0.09876543  ...
+KO00002    0.00000000  0.04321098  ...
+```
+
+---
+
+### `pipeline`
+
+One-command orchestrator that chains all steps automatically.
+
+#### Run Modes
+
+| Mode | Description |
+|------|-------------|
+| `full` | Build database + profile all samples |
+| `db-only` | Build qualitative database only |
+| `sample-only` | Profile samples using an existing database |
+
+#### Full Pipeline
+
+```bash
+fast2bRAD-M pipeline \
+  --mode full \
+  --samples samples.tsv \
+  --genome-list genome_list.tsv \
+  --taxonomy taxonomy.tsv \
+  --site BcgI \
+  --level species \
+  --outdir results/ \
+  --prefix run1 \
+  --threads 16 \
+  --gscore 5 \
+  --gcf 1 \
+  --resume yes
+```
+
+#### Database Build Only
+
+```bash
 fast2bRAD-M pipeline \
   --mode db-only \
-  --genome-list /abs/pre_digested_file_list.tsv \
-  --taxonomy /abs/abfh_classify_with_speciename.txt \
+  --genome-list genome_list.tsv \
+  --taxonomy taxonomy.tsv \
+  --pre-digested-dir pre_digested/ \
   --site BcgI \
   --level species \
-  --outdir /abs/outdir \
-  --prefix run \
-  --gscore 5 \
-  --threads 4 \
-  --pc 8 \
-  --min-qual 15 \
-  --resume yes
-
-# 使用已有数据库（推荐：与 Perl 一致的 classify 与 *.fa.gz）
-fast2bRAD-M pipeline \
-  --mode sample-only \
-  --samples /abs/samples_list.tsv \
-  --database /abs/db_ready \
-  --site BcgI \
-  --level species \
-  --outdir /abs/outdir \
-  --prefix run \
-  --gscore 5 \
-  --threads 4 \
-  --pc 8 \
-  --min-qual 15 \
-  --resume yes
+  --outdir db/ \
+  --threads 16
 ```
 
-参数与默认（对齐 Perl 取舍）：
-- `--mode`：full|db-only|sample-only（默认 full）
-- `--gscore`：默认 5（与 Perl 常用阈值一致）
-- `--resume`：默认 yes（存在产物则跳过）
-- `--threads`：设置 `RAYON_NUM_THREADS`；不设则自动
-- `--mock`、`--control`：合并阶段过滤（与 Perl 行为一致）
-- `--samples`：TSV：`sample<TAB>path1[<TAB>path2]`（原始 FASTQ/FASTA 路径，非 .iibsp）
-- 数据库目录需包含：`BcgI.species.fa.gz` 和 `abfh_classify_with_speciename.txt.gz`
-
-Bash 包装脚本（与上完全等价）：
-```bash
-bash fast2bRAD-M/scripts/run_pipeline.sh --help
-```
-
-**样品列表格式** (`sample_list.tsv`)：
-- 第1列：样品名（输出文件前缀）
-- 第2列：输入文件路径
-- 第3列：输入文件路径2（可选，用于 Type 2/4 双端数据）
-- 以 `#` 开头的行为注释
-
-示例：
-```tsv
-# Type 1: 参考基因组
-ecoli	/path/to/ecoli.fna.gz
-lplantarum	/path/to/lplantarum.fna.gz
-sagalactiae	/path/to/sagalactiae.fna.gz
-```
-
-```tsv
-# Type 2: Shotgun 双端测序
-sample1	/path/to/sample1_R1.fq.gz	/path/to/sample1_R2.fq.gz
-sample2	/path/to/sample2_R1.fq.gz	/path/to/sample2_R2.fq.gz
-```
-
-### 输入类型说明
-
-1. **Type 1**: 参考基因组 FASTA - 滑动窗口全匹配，用于构建数据库
-2. **Type 2**: Shotgun 测序（SE/PE）- 序列内匹配所有标签位点（去重）
-3. **Type 3**: 2bRAD 单标签（SE）- 只取第一个匹配的标签
-
-### 支持的酶（1-16）
-
-1. CspCI
-2. AloI
-3. BsaXI
-4. BaeI
-5. BcgI（默认）
-6. CjeI
-7. PpiI
-8. PsrI
-9. BplI
-10. FalI
-11. Bsp24I
-12. HaeIV
-13. CjePI
-14. Hin4I
-15. AlfI
-16. BslFI
-
-### 参数说明
-
-- `--batch`：批量处理样品列表（TSV 格式）
-- `-i, --input`：输入文件（支持 .gz）
-- `-t, --type`：输入类型（1-3）
-- `-s, --site`：酶编号（1-16）或名称
-- `--od`：输出目录
-- `--op`：输出前缀
-- `--gz`：是否压缩（yes/no，默认 yes）
-- `--qc`：是否质控（yes/no，默认 yes）
-- `-n, --max-n`：最大 N 比例（默认 0.08）
-- `-q, --min-quality`：最低质量分数（默认 30）
-- `-p, --min-quality-percent`：最低质量百分比（默认 80）
-- `-b, --quality-base`：质量编码（默认 33）
-- `--fm`：输出格式（fa/fq，默认 fa）
-
-## 输出
-
-### 标签文件
-
-- Type 1-3 文件名：`{sample}.{enzyme}.{format}.gz`
-- 扩展名：`.iibsp`（IIB = Type IIB 限制酶）
-- 格式：FASTA 或 FASTQ
-
-### 统计文件
-
-- Type 1-3：`{sample}.{enzyme}.stat.tsv`
-- 内容：输入序列数、标签数、百分比等
-
-
-### build-qual-db - 构建定性数据库
-
-从参考基因组构建分类特异性 2bRAD 标签数据库：
-
-```bash
-# 构建 species 级别数据库
-fast2bRAD-M build-qual-db \
-  -l genome_list.tsv \
-  -s 5 \
-  -t species \
-  -o database_dir
-
-# 构建多个级别数据库
-fast2bRAD-M build-qual-db \
-  -l genome_list.tsv \
-  -s BcgI \
-  -t genus,species \
-  -o database_dir
-
-# 构建所有级别数据库
-fast2bRAD-M build-qual-db \
-  -l genome_list.tsv \
-  -s 5 \
-  -t all \
-  -o database_dir \
-  -r yes
-```
-
-### 基因组列表格式
-
-TSV 文件，每行包含：
-```
-GCFid    Kingdom    Phylum    Class    Order    Family    Genus    Species    Strain    genome_path
-```
-
-示例：
-```
-GCF_000007445.1    Bacteria    Proteobacteria    Gammaproteobacteria    Enterobacterales    Enterobacteriaceae    Escherichia    Escherichia_coli    str._K-12    /path/to/genome.fna.gz
-```
-
-## 已完成功能
-
-✅ **extract**（数字酶切）- 支持 Type 1-3 全部输入类型  
-✅ **build-qual-db**（定性数据库）- 输出所有标签+unique标记  
-✅ **build-quan-db**（定量数据库）- 只输出unique标签  
-✅ **quantify**（丰度计算）- 计算样品中微生物相对丰度，输出 GCF_detected.xls  
-✅ **find-genome**（筛选基因组）- 根据定性结果筛选定量分析所需的基因组  
-✅ **merge**（结果合并）- 合并多样品丰度表  
-
-## 使用示例
-
-### 完整分析流程
-
-```bash
-# 1. 数字酶切
-fast2bRAD-M extract --batch sample_list.tsv -t 2 -s 5 --od enzyme_result
-
-# 2. 定性分析
-fast2bRAD-M quantify -l enzyme_list.tsv -d qual_db -t species -s 5 -o qualitative
-
-# 3. 根据定性结果筛选基因组（新增功能）
-fast2bRAD-M find-genome \
-  -l sample_list.tsv \
-  -d database_dir \
-  -o quantitative_sdb \
-  --qual-dir qualitative \
-  --gscore 5 \
-  --gcf 1
-
-# 4. 构建样品特异性定量数据库
-fast2bRAD-M build-quan-db \
-  -l quantitative_sdb/sample1/sdb.list \
-  -s 5 \
-  -t species \
-  -o quantitative_sdb/sample1/database
-
-# 5. 定量分析
-fast2bRAD-M quantify -l sample_list.tsv -d quantitative_sdb/sample1/database -t species -s 5 -o quantitative
-
-# 6. 结果合并
-fast2bRAD-M merge -l abundance_list.tsv -o quantitative -p Abundance_Stat
-```
-
-### find-genome - 根据定性结果筛选基因组
-
-根据定性分析结果，筛选出用于定量分析的候选基因组：
-
-```bash
-fast2bRAD-M find-genome \
-  -l sample_list.tsv \
-  -d database_dir \
-  -o output_dir \
-  --qual-dir qualitative_dir \
-  --gscore 5 \
-  --gcf 1
-```
-
-**参数说明**：
-- `-l, --list`: 样品列表文件（TSV格式）
-- `-d, --database`: 数据库目录（需包含 `abfh_classify_with_speciename.txt.gz`）
-- `-o, --output`: 输出目录
-- `--qual-dir`: 定性分析结果目录
-- `--gscore`: G-score 阈值（默认 5，表示 >5）
-- `--gcf`: GCF 标签数阈值（默认 1，表示 >1）
-
-**输出**：
-- `$output_dir/$sample/sdb.list` - 每个样品的候选基因组列表
-
-
-## pipeline：双端与 PEAR 透传
-
-流水线使用已有数据库时的一键示例（双端+PEAR）：
+#### Sample-Only (Use Existing Database)
 
 ```bash
 fast2bRAD-M pipeline \
   --mode sample-only \
-  -l /abs/samples.tsv \
-  -s BcgI -t species \
-  --outdir /abs/runs/run_pe \
-  --prefix run_pe \
-  -d /abs/db_ready \
-  --pe pear --pc 8 \
+  --samples samples.tsv \
+  --database db/ \
+  --site BcgI \
+  --level species \
+  --outdir results/ \
+  --prefix run1 \
+  --threads 16 \
   --resume yes
 ```
 
-说明：
-- 若样品行提供两列路径（R1、R2），pipeline 会透传 `--pe/--pc` 到 extract，先调用 PEAR 拼接，再继续提取。
-- 生成的中间合并文件为 `<prefix>.<enzyme>.pear.fastq`，最终样品标签文件为 `<prefix>.<enzyme>.iibsp[.gz]`。
+#### With Functional Prediction
 
-## 许可证
+```bash
+fast2bRAD-M pipeline \
+  --mode sample-only \
+  --samples samples.tsv \
+  --database db/ \
+  --site BcgI \
+  --outdir results/ \
+  --prefix run1 \
+  --threads 16 \
+  --ko-mapping ko_mapping.tsv   # triggers automatic predict step after merge
+```
 
-继承原 2bRAD-M 项目许可证
+#### All Pipeline Parameters
 
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--mode` | `full` | Run mode: `full`, `db-only`, `sample-only` |
+| `--samples` / `-l` | — | Sample list TSV (required for `full`/`sample-only`) |
+| `--genome-list` | — | Reference genome list (for `db-only` / database building) |
+| `--taxonomy` | — | Taxonomy/classify file (TSV or GTDB format) |
+| `--database` | — | Pre-built database directory (for `sample-only`) |
+| `--pre-digested-dir` | — | Directory with pre-digested `.iibdb` files |
+| `--site` / `-s` | — | Enzyme name (`BcgI`) or ID (`1`–`16`) |
+| `--level` / `-t` | `species` | Taxonomy level for profiling |
+| `--outdir` | — | Output directory |
+| `--prefix` | `Abundance_Stat` | Prefix for output files |
+| `--threads` / `-j` | auto | Global thread count |
+| `--gscore` | `5.0` | G-score threshold for find-genome |
+| `--gcf` | `1` | Min detected tags per GCF in find-genome |
+| `--resume` | `no` | Skip steps that already have `.done` markers (`yes`/`no`) |
+| `--qc` | `yes` | Quality control for extract |
+| `--max-n` | `0.08` | Max N-base ratio |
+| `--min-qual` | `30` | Min base quality score |
+| `--min-qual-percent` | `80` | Min percent of bases passing quality |
+| `--qual-base` | `33` | Quality score encoding base |
+| `--use-pear` | `no` | Enable PEAR merging for paired-end reads |
+| `--pear-bin` | `pear` | Path to PEAR executable |
+| `--pc` | `1` | Threads per PEAR process |
+| `--mock` | — | Comma-separated mock sample names (for merge filtering) |
+| `--control` | — | Comma-separated negative control names (for merge filtering) |
+| `--ko-mapping` | — | Species-to-function mapping matrix; triggers `predict` step after merge |
+
+---
+
+## File Formats
+
+### Sample List (`samples.tsv`)
+
+```tsv
+# sample_name  path_to_R1               path_to_R2 (optional for PE)
+sample1         /path/sample1_R1.fq.gz  /path/sample1_R2.fq.gz
+sample2         /path/sample2_R1.fq.gz
+```
+
+### Genome List (`genome_list.tsv`)
+
+Standard format:
+```tsv
+GCF_000007445.1  Bacteria  Proteobacteria  Gammaproteobacteria  Enterobacterales  Enterobacteriaceae  Escherichia  Escherichia_coli  str.K-12  /path/to/genome.fna.gz
+```
+
+GTDB format (auto-detected):
+```tsv
+GCF_000007445.1  d__Bacteria;p__Proteobacteria;c__Gammaproteobacteria;...
+```
+
+### KO Mapping Matrix (`ko_mapping.tsv`)
+
+```tsv
+#Species                KO00001  KO00002  KO00003
+Escherichia_coli           5        0        3
+Cutibacterium_acnes        2        8        0
+```
+
+---
+
+## Supported Enzymes
+
+| ID | Name    | Tag Length |
+|----|---------|-----------|
+| 1  | CspCI   | 36 bp |
+| 2  | AloI    | 37 bp |
+| 3  | BsaXI   | 32 bp |
+| 4  | BaeI    | 36 bp |
+| **5**  | **BcgI** *(recommended)* | **32 bp** |
+| 6  | CjeI    | 37 bp |
+| 7  | PpiI    | 35 bp |
+| 8  | PsrI    | 35 bp |
+| 9  | BplI    | 35 bp |
+| 10 | FalI    | 36 bp |
+| 11 | Bsp24I  | 36 bp |
+| 12 | HaeIV   | 37 bp |
+| 13 | CjePI   | 38 bp |
+| 14 | Hin4I   | 35 bp |
+| 15 | AlfI    | 33 bp |
+| 16 | BslFI   | 33 bp |
+
+Enzymes can be specified by name (`--site BcgI`) or numeric ID (`--site 5`).
+
+---
+
+## Output Directory Structure
+
+```
+results/
+├── 01_extract/                    # Step 1: Tag extraction
+│   ├── sample1.BcgI.iibsp         # Binary tag file
+│   ├── sample1.BcgI.stat.tsv      # Statistics
+│   └── .done
+│
+├── 02_db_qual/                    # Step 2: Qualitative database
+│   ├── BcgI.enzyme.iibdb          # All genome tags
+│   ├── BcgI.species.iibdb         # Species-unique tags
+│   ├── abfh_classify_with_speciename.txt.gz
+│   └── .done
+│
+├── 02_db_quan/                    # Per-sample quantitative databases
+│   ├── sample1/
+│   │   ├── BcgI.species.iibdb
+│   │   └── abfh_classify_with_speciename.txt.gz
+│   └── sample2/
+│
+├── qualitative/                   # Qualitative screening results
+│   ├── sample1/
+│   │   ├── sample1.BcgI.xls
+│   │   └── sample1.BcgI.GCF_detected.xls
+│   └── .done
+│
+├── quantitative_sdb/              # Per-sample genome selection lists
+│   ├── sample1/sdb.list
+│   ├── sample2/sdb.list
+│   └── .done
+│
+├── 04_quantify/                   # Quantitative profiling results
+│   ├── sample1/
+│   │   ├── sample1/sample1.BcgI.xls
+│   │   └── .done
+│   └── sample2/
+│
+└── 05_merge/                      # Final results
+    ├── run1.all.xls               # Merged species abundance (all samples)
+    ├── run1.filtered.xls          # Filtered (mock/control removed)
+    ├── run1.func.xls              # Functional abundance (if --ko-mapping used)
+    └── .done
+```
+
+---
+
+## Binary File Format
+
+Fast2bRAD-M uses a compact binary format (`.iibsp` / `.iibdb`) for storing hashed 2bRAD tags:
+
+- Each record: `[8-byte u64 hash][4-byte u32 id_length][id_bytes...]`
+- Tags are stored as canonical (lexicographically smaller of forward/reverse-complement) FxHash values
+- This format enables fast random-access loading and minimal I/O
+
+---
+
+## Citation
+
+If you use Fast2bRAD-M in your research, please cite the original 2bRAD-M paper:
+
+> **2bRAD-M: Genome-level microbiome analysis using 2bRAD sequencing**
+> Huang Lab, *Bioinformatics* (2022)
+> https://github.com/HuangShiLab/2bRAD-M
+
+---
+
+## License
+
+Inherits the license of the original [2bRAD-M](https://github.com/HuangShiLab/2bRAD-M) project.
