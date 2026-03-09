@@ -125,7 +125,7 @@ pub fn run(args: BuildQuanDbArgs) -> Result<()> {
     std::fs::create_dir_all(&args.output_dir)?;
     let remove_redundant = args.remove_redundant.to_lowercase() == "yes";
 
-    let (intermediate_enzyme_file, enzyme_file_generated) = digest_genomes_to_intermediate_file(
+    let intermediate_enzyme_file = digest_genomes_to_intermediate_file(
         &genome_records, enzyme, &args.output_dir, args.enzyme_file.as_ref(), args.pre_digested_dir.as_ref()
     )?;
 
@@ -202,16 +202,16 @@ fn parse_gtdb_taxonomy(gtdb_str: &str) -> Result<Vec<String>> {
 }
 
 /// Returns (path, was_generated). `was_generated` is false when using an existing file via `-e`.
-fn digest_genomes_to_intermediate_file(genomes: &[GenomeRecord], enzyme: &'static Enzyme, output_dir: &Path, enzyme_file: Option<&PathBuf>, pre_digested_dir: Option<&PathBuf>) -> Result<(PathBuf, bool)> {
+fn digest_genomes_to_intermediate_file(genomes: &[GenomeRecord], enzyme: &'static Enzyme, output_dir: &Path, enzyme_file: Option<&PathBuf>, pre_digested_dir: Option<&PathBuf>) -> Result<PathBuf> {
     if let Some(existing_file) = enzyme_file {
         tracing::info!("Using pre-digested file: {}", existing_file.display());
-        return Ok((existing_file.clone(), false));
+        return Ok(existing_file.clone());
     }
     if let Some(dir) = pre_digested_dir {
         tracing::info!("Merging pre-digested files from directory in parallel: {}", dir.display());
         let output_file = output_dir.join(format!("{}.enzyme.iibdb", enzyme.name));
         merge_pre_digested_files(genomes, enzyme, dir, &output_file)?;
-        return Ok((output_file, true));
+        return Ok(output_file);
     }
     bail!("Please provide -e or --pre-digested-dir");
 }

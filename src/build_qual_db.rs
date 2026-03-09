@@ -138,19 +138,19 @@ pub fn run(args: BuildQualDbArgs) -> Result<()> {
     let genomes = read_genome_list(&args.genome_list)?;
     tracing::info!("Total {} genomes", genomes.len());
 
-    let (enzyme_file, enzyme_file_generated) = if let Some(ref file) = args.enzyme_file {
+    let enzyme_file = if let Some(ref file) = args.enzyme_file {
         tracing::info!("Using pre-digested file: {}", file.display());
-        (file.clone(), false)
+        file.clone()
     } else if let Some(ref dir) = args.pre_digested_dir {
         tracing::info!("Merging pre-digested files from directory in parallel: {}", dir.display());
         let output_file = args.output_dir.join(format!("{}.enzyme.iibdb", enzyme.name));
         merge_pre_digested_files(&genomes, enzyme, dir, &output_file)?;
-        (output_file, true)
+        output_file
     } else {
         tracing::info!("Digesting genomes and generating hashes (Parallel Binary) ...");
         let output_file = args.output_dir.join(format!("{}.enzyme.iibdb", enzyme.name));
         digest_genomes(&genomes, enzyme, &output_file)?;
-        (output_file, true)
+        output_file
     };
 
     // [Optimization] Load enzyme file into memory once, reuse for all levels
