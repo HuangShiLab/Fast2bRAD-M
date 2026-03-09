@@ -28,7 +28,7 @@
 
 ## Features
 
-- **High Performance** — Rust implementation with Rayon multi-core parallelism; batch-digesting 15 reference genomes in < 0.12 s
+- **High Performance** — Rust implementation with Rayon multi-core parallelism
 - **Full Enzyme Support** — All 16 Type IIB restriction enzymes (BcgI, CspCI, AloI, BsaXI, BaeI, CjeI, PpiI, PsrI, BplI, FalI, Bsp24I, HaeIV, CjePI, Hin4I, AlfI, BslFI)
 - **All Input Types** — Reference genomes, Shotgun metagenomic reads (SE/PE), and single 2bRAD tags
 - **Built-in QC** — N-ratio, minimum quality score, and minimum quality-percent filtering
@@ -50,7 +50,7 @@ cargo build --release
 
 ### Option 2 — Direct Compilation
 
-Prerequisites: [Rust toolchain](https://rustup.rs/) ≥ 1.70
+Prerequisites: [Rust toolchain](https://rustup.rs/) ≥ 1.88
 
 ```bash
 git clone https://github.com/HuangShiLab/Fast2bRAD-M.git
