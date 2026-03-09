@@ -25,16 +25,14 @@ const CHANNEL_BUFFER: usize = 16;
 
 pub type Hash = u64;
 
-pub fn hash_bytes(bytes: &[u8]) -> Hash {
-    let mut hasher = FxHasher::default();
-    hasher.write(bytes);
-    hasher.finish()
-}
-
-fn get_canonical_sequence(seq: &[u8]) -> Vec<u8> {
-    let mut rc = Vec::with_capacity(seq.len());
-    for &b in seq.iter().rev() {
-        let complement = match b {
+/// Compute hash of the canonical (lexicographically smaller of forward/RC) sequence.
+/// Uses a fixed stack buffer — zero heap allocation. tag_length must be ≤ 40.
+#[inline]
+fn canonical_hash(seq: &[u8]) -> Hash {
+    let mut rc_buf = [0u8; 40];
+    let len = seq.len();
+    for i in 0..len {
+        rc_buf[i] = match seq[len - 1 - i] {
             b'A' | b'a' => b'T',
             b'T' | b't' => b'A',
             b'C' | b'c' => b'G',
@@ -42,14 +40,12 @@ fn get_canonical_sequence(seq: &[u8]) -> Vec<u8> {
             b'N' | b'n' => b'N',
             x => x,
         };
-        rc.push(complement);
     }
-
-    if seq <= rc.as_slice() {
-        seq.to_vec()
-    } else {
-        rc
-    }
+    let rc = &rc_buf[..len];
+    let canonical = if seq <= rc { seq } else { rc };
+    let mut hasher = FxHasher::default();
+    hasher.write(canonical);
+    hasher.finish()
 }
 
 // [Optimization] RawRecord struct adjustments
@@ -96,38 +92,60 @@ struct WriteTask {
 
 #[derive(Args, Debug, Clone)]
 pub struct ExtractArgs {
-    #[arg(long = "genome-list")]
+    // ── Input (choose one of --genome-list or -i) ──
+    /// Batch mode: genome/sample list file (TSV: name<TAB>path1[<TAB>path2]). Mutually exclusive with -i
+    #[arg(long = "genome-list", conflicts_with = "input", help_heading = "Input")]
     pub genome_list: Option<PathBuf>,
-    #[arg(short = 'i', long = "input", num_args = 1..=2)]
+    /// Single mode: one or two FASTQ/FASTA files (PE: R1 R2). Mutually exclusive with --genome-list
+    #[arg(short = 'i', long = "input", num_args = 1..=2, conflicts_with = "genome_list", help_heading = "Input")]
     pub input: Vec<PathBuf>,
-    #[arg(short = 't', long = "type")]
+    /// Input type: 1=reference genome, 2=shotgun reads (SE/PE), 3=single 2bRAD tags
+    #[arg(short = 't', long = "type", help_heading = "Input")]
     pub input_type: u8,
-    #[arg(short = 's', long = "site")]
+    /// Enzyme name (e.g. BcgI) or numeric ID (1–16)
+    #[arg(short = 's', long = "site", help_heading = "Input")]
     pub enzyme_site: String,
-    #[arg(long = "od")]
+
+    // ── Output ──
+    /// Output directory
+    #[arg(long = "od", help_heading = "Output")]
     pub output_dir: PathBuf,
-    #[arg(long = "op", num_args = 1)]
+    /// Output file prefix (only used in single mode with -i)
+    #[arg(long = "op", num_args = 1, help_heading = "Output")]
     pub output_prefix: Vec<String>,
-    #[arg(short = 'j', long = "threads", default_value = "4")]
-    pub threads: usize,
-    #[arg(long = "qc", default_value = "yes")]
+
+    // ── Quality Control (for sample reads, -t 2/3) ──
+    /// Enable quality control filtering (yes/no)
+    #[arg(long = "qc", default_value = "yes", help_heading = "Quality Control")]
     pub quality_control: String,
-    #[arg(short = 'n', long, default_value = "0.08")]
+    /// Maximum allowed N-base ratio per read (reads exceeding this are discarded)
+    #[arg(short = 'n', long, default_value = "0.08", help_heading = "Quality Control")]
     pub max_n: f64,
-    #[arg(short = 'q', long, default_value = "30")]
+    /// Minimum base quality score (Phred)
+    #[arg(short = 'q', long, default_value = "30", help_heading = "Quality Control")]
     pub min_quality: u8,
-    #[arg(short = 'p', long, default_value = "80")]
+    /// Minimum percentage of bases that must pass the quality threshold
+    #[arg(short = 'p', long, default_value = "80", help_heading = "Quality Control")]
     pub min_quality_percent: u8,
-    #[arg(short = 'b', long, default_value = "33")]
+    /// Quality score encoding base (33=Phred+33/Sanger, 64=Phred+64)
+    #[arg(short = 'b', long, default_value = "33", help_heading = "Quality Control")]
     pub quality_base: u8,
-    #[arg(long = "pe", default_value = "pear")]
+
+    // ── PEAR Merging (only for PE reads, -t 2) ──
+    /// Enable PEAR merging for paired-end reads (yes/no). Significantly slower when enabled
+    #[arg(long = "use-pear", default_value = "no", help_heading = "PEAR Merging (PE only)")]
+    pub use_pear: String,
+    /// Path to PEAR executable
+    #[arg(long = "pe", default_value = "pear", help_heading = "PEAR Merging (PE only)")]
     pub pear_bin: String,
-    #[arg(long = "pc", default_value = "1")]
+    /// Threads per PEAR process
+    #[arg(long = "pc", default_value = "1", help_heading = "PEAR Merging (PE only)")]
     pub pear_threads: usize,
 
-    // [New] Whether to use PEAR
-    #[arg(long = "use-pear", default_value = "no")]
-    pub use_pear: String,
+    // ── Performance ──
+    /// Number of parallel threads
+    #[arg(short = 'j', long = "threads", default_value = "4", help_heading = "Performance")]
+    pub threads: usize,
 }
 
 pub fn run(args: ExtractArgs) -> Result<()> {
@@ -358,8 +376,7 @@ fn process_genome_batch(
         for (pos, len) in positions_iter {
             if pos + len > sequence.len() { continue; }
             let tag_seq = &sequence[pos..pos + len];
-            let canonical = get_canonical_sequence(tag_seq);
-            let hash = hash_bytes(&canonical);
+            let hash = canonical_hash(tag_seq);
             let id_str = format!("{}:{}", seq_id, pos);
             tasks.push(WriteTask { hash, id_str });
         }
@@ -468,8 +485,7 @@ fn process_shotgun_batch(
         let mut tasks = Vec::with_capacity(positions.len());
         for (i, (pos, len)) in positions.iter().enumerate() {
             let tag_seq = &sequence[*pos..*pos + len];
-            let canonical = get_canonical_sequence(tag_seq);
-            let tag_hash = hash_bytes(&canonical);
+            let tag_hash = canonical_hash(tag_seq);
             let id_str = format!("{}_tag{}", seq_id, i + 1);
             tasks.push(WriteTask { hash: tag_hash, id_str });
         }
@@ -569,7 +585,7 @@ fn process_single_tag_batch(
                 let window = &sequence[offset..offset + enzyme.tag_length];
                 if pattern.matches(window) {
                     let mut pass = true;
-                    if qc.check_n(window) { pass = false; }
+                    if !qc.check_n(window) { pass = false; }
                     if pass {
                         if !record.qual.is_empty() {
                             if offset + enzyme.tag_length <= record.qual.len() {
@@ -579,8 +595,7 @@ fn process_single_tag_batch(
                         }
                     }
                     if pass {
-                        let canonical = get_canonical_sequence(window);
-                        let hash = hash_bytes(&canonical);
+                        let hash = canonical_hash(window);
                         // Only convert ID string when confirmed to pass
                         let id_str = String::from_utf8_lossy(&record.id).to_string();
                         return Some((true, WriteTask { hash, id_str }));

@@ -9,24 +9,23 @@ use tracing;
 /// Merge multi-sample abundance tables
 #[derive(Parser, Debug)]
 pub struct MergeArgs {
-    /// Sample list file (TSV format: sample_name<tab>profile_path)
-    #[arg(short = 'l', long = "list")]
+    // ── Input / Output ──
+    /// Sample list file (TSV: sample_name<TAB>path_to_{sample}.{enzyme}.xls)
+    #[arg(short = 'l', long = "list", help_heading = "Input / Output")]
     pub sample_list: PathBuf,
-
     /// Output directory
-    #[arg(short = 'o', long = "output")]
+    #[arg(short = 'o', long = "output", help_heading = "Input / Output")]
     pub output_dir: PathBuf,
-
-    /// Output file prefix
-    #[arg(short = 'p', long = "prefix", default_value = "Abundance_Stat")]
+    /// Output file name prefix
+    #[arg(short = 'p', long = "prefix", default_value = "Abundance_Stat", help_heading = "Input / Output")]
     pub prefix: String,
 
-    /// Mock sample names (comma-separated, for filtering)
-    #[arg(short = 'm', long = "mock")]
+    // ── Filtering (for generating filtered output) ──
+    /// Mock community sample names (comma-separated). These samples are excluded from the filtered output
+    #[arg(short = 'm', long = "mock", help_heading = "Filtering")]
     pub mock_samples: Option<String>,
-
-    /// Negative control sample names (comma-separated, for filtering)
-    #[arg(short = 'c', long = "control")]
+    /// Negative control sample names (comma-separated). These samples are excluded, and all taxa detected in controls are removed as contamination
+    #[arg(short = 'c', long = "control", help_heading = "Filtering")]
     pub control_samples: Option<String>,
 }
 

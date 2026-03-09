@@ -30,12 +30,12 @@ pub struct PipelineArgs {
     #[arg(long = "samples", alias = "list", short = 'l')]
     pub samples: Option<PathBuf>,
 
-    /// Renamed parameter: genome sequence list (TSV: genome_id<TAB>fasta_path)
+    /// Genome sequence list (TSV: genome_id<TAB>fasta_path)
     /// Used only in db-only mode for batch-extracting 2bRAD features from reference genomes
     #[arg(long = "genome-list")]
     pub genome_list: Option<PathBuf>,
 
-    /// Renamed parameter: genome taxonomy list (TSV: genome_id<TAB>taxonomy...)
+    /// Genome taxonomy list (TSV: genome_id<TAB>taxonomy...)
     /// Used for database construction
     #[arg(long = "taxonomy")]
     pub taxonomy: Option<PathBuf>,
@@ -69,38 +69,50 @@ pub struct PipelineArgs {
     pub resume: String,
 
     // --- extract options ---
+    /// Enable quality control filtering for sample reads (yes/no)
     #[arg(long = "qc", default_value = "yes")]
     pub quality_control: String,
+    /// Maximum allowed N-base ratio per read (reads exceeding this are discarded)
     #[arg(long = "max-n", default_value = "0.08")]
     pub max_n: f64,
+    /// Minimum base quality score (Phred) for quality filtering
     #[arg(long = "min-qual", default_value = "30")]
     pub min_quality: u8,
+    /// Minimum percentage of bases that must pass the quality threshold
     #[arg(long = "min-qual-percent", default_value = "80")]
     pub min_quality_percent: u8,
+    /// Quality score encoding base (33 for Phred+33/Sanger, 64 for Phred+64)
     #[arg(long = "qual-base", default_value = "33")]
     pub quality_base: u8,
+    /// Path to PEAR executable (for paired-end read merging)
     #[arg(long = "pear-bin")]
     pub pear_bin: Option<String>,
-
     /// Threads per PEAR process
     #[arg(long = "pc", default_value = "1")]
     pub pear_threads: usize,
-
-    /// Updated help text: whether to use PEAR merging
-    #[arg(long = "use-pear", default_value = "no", help = "Whether to use PEAR merging (yes/no, default: no). Choosing yes will significantly slow down analysis.")]
+    /// Whether to use PEAR merging for paired-end reads (yes/no). Choosing yes will significantly slow down analysis.
+    #[arg(long = "use-pear", default_value = "no")]
     pub use_pear: String,
 
     // --- build-db options ---
+    /// Pre-built database directory (for sample-only mode, skips database construction)
     #[arg(long = "database")]
     pub database_dir: Option<PathBuf>,
+    /// Directory containing pre-digested .iibdb files (skips genome digestion step)
     #[arg(long = "pre-digested-dir")]
     pub pre_digested_dir: Option<PathBuf>,
+    /// Pre-built enzyme intermediate file (.enzyme.iibdb). If provided, skip genome digestion and use this file directly for database construction.
+    #[arg(short = 'e', long = "enzyme-file")]
+    pub enzyme_file: Option<PathBuf>,
 
     // --- merge options ---
+    /// Output file name prefix for merge and predict results
     #[arg(long = "prefix", default_value = "Abundance_Stat")]
     pub prefix: String,
+    /// Comma-separated mock community sample names (excluded from filtered output)
     #[arg(long = "mock")]
     pub mock_samples: Option<String>,
+    /// Comma-separated negative control sample names (excluded from filtered output; taxa detected in controls are flagged as contamination)
     #[arg(long = "control")]
     pub control_samples: Option<String>,
 
@@ -262,7 +274,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
                 enzyme_site: args.site.clone(),
                 taxonomy_levels: args.level.clone(),
                 output_dir: d02.clone(),
-                enzyme_file: None,
+                enzyme_file: args.enzyme_file.clone(),
                 // Use the updated pre-digested directory (may be pre_digested_output)
                 pre_digested_dir: current_pre_digested_dir.clone(),
                 remove_redundant: "yes".to_string(),
@@ -346,9 +358,14 @@ pub fn run(args: PipelineArgs) -> Result<()> {
 
     let samples_vec = read_sample_names(samples_path_buf)?;
 
-    let enzyme_file = qual_db_dir.join(format!("{}.enzyme.iibdb", get_enzyme_name(&args.site)?));
+    // Resolve enzyme file: use user-provided --enzyme-file, or look inside qual_db_dir
+    let enzyme_file = if let Some(ref ef) = args.enzyme_file {
+        ef.clone()
+    } else {
+        qual_db_dir.join(format!("{}.enzyme.iibdb", get_enzyme_name(&args.site)?))
+    };
     if !enzyme_file.exists() {
-        bail!("Qualitative database enzyme file not found: {}; please verify database integrity", enzyme_file.display());
+        bail!("Enzyme file not found: {}; provide --enzyme-file or verify database integrity", enzyme_file.display());
     }
 
     let all_quant_finished = AtomicBool::new(true);

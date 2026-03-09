@@ -9,20 +9,20 @@ use tracing;
 /// Functional abundance prediction: t(species abundance table) * species-to-function matrix = functional abundance table
 #[derive(Parser, Debug, Clone)]
 pub struct PredictArgs {
-    /// species abundance table (.all.xls file produced by the merge step)
-    #[arg(short = 'a', long = "abundance")]
+    // ── Input ──
+    /// Species abundance table (.all.xls from merge step)
+    #[arg(short = 'a', long = "abundance", help_heading = "Input")]
     pub abundance_file: PathBuf,
-
-    /// species-to-function mapping matrix (TSV: first row is header, first column is species name, remaining columns are function IDs with gene copy counts as values)
-    #[arg(short = 'm', long = "mapping")]
+    /// Species-to-function mapping matrix (TSV: species name column + function ID columns with gene copy counts)
+    #[arg(short = 'm', long = "mapping", help_heading = "Input")]
     pub mapping_file: PathBuf,
 
-    /// output directory
-    #[arg(short = 'o', long = "output")]
+    // ── Output ──
+    /// Output directory
+    #[arg(short = 'o', long = "output", help_heading = "Output")]
     pub output_dir: PathBuf,
-
-    /// output file prefix
-    #[arg(short = 'p', long = "prefix", default_value = "Abundance_Stat")]
+    /// Output file name prefix
+    #[arg(short = 'p', long = "prefix", default_value = "Abundance_Stat", help_heading = "Output")]
     pub prefix: String,
 }
 

@@ -21,6 +21,7 @@ ndarray = "0.15"         # 用于机器学习模块的矩阵运算
 # 生物信息学特定解析
 needletail = "0.5"       # 极速解析 FASTA/FASTQ 文件
 flate2 = "1.0"           # 支持 .gz 压缩文件的读写
+zstd = "0.13"            # 高比率压缩，用于紧凑数据库格式
 
 # 机器学习推理 (ONNX Runtime)
 ort = {version = "2.0.0-rc.12", features = ["ndarray"]}              # 运行随机森林等 ONNX 模型

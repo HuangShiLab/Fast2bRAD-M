@@ -185,7 +185,8 @@ fast2bRAD-M build-qual-db \
   -o db_qual/ \
   --pre-digested-dir pre_digested/ \  # optional: pre-digested .iibdb files
   -r yes \               # remove redundant tags
-  -j 8
+  -j 8 \
+  --keep-enzyme-file no  # keep intermediate enzyme file (yes/no, default: no)
 ```
 
 **Genome list format** (Tab-separated):
@@ -195,8 +196,8 @@ GCF_000007445.1  Bacteria  Proteobacteria  Gammaproteobacteria  Enterobacterales
 Or GTDB format (second column = `d__Bacteria;p__Proteobacteria;...`).
 
 **Output** (per taxonomy level):
-- `{enzyme}.enzyme.iibdb` — All tags from all genomes (intermediate)
-- `{enzyme}.{level}.iibdb` — Taxon-unique tags only
+- `{enzyme}.enzyme.iibdb` — All tags from all genomes (intermediate; auto-deleted unless `--keep-enzyme-file yes`)
+- `{enzyme}.{level}.iibdb` — Taxon-unique tags only (zstd-compressed compact format)
 - `abfh_classify_with_speciename.txt.gz` — GCF-to-taxonomy mapping
 
 ---
@@ -212,7 +213,8 @@ fast2bRAD-M build-quan-db \
   -t species \
   -o sample_db/ \
   -e qual_db/BcgI.enzyme.iibdb \  # reuse the enzyme file from qual DB
-  -j 4
+  -j 4 \
+  --keep-enzyme-file no   # keep intermediate enzyme file (yes/no, default: no)
 ```
 
 **Output**:
@@ -416,6 +418,7 @@ fast2bRAD-M pipeline \
 | `--taxonomy` | — | Taxonomy/classify file (TSV or GTDB format) |
 | `--database` | — | Pre-built database directory (for `sample-only`) |
 | `--pre-digested-dir` | — | Directory with pre-digested `.iibdb` files |
+| `-e` / `--enzyme-file` | — | Pre-built enzyme intermediate file; skips genome digestion |
 | `--site` / `-s` | — | Enzyme name (`BcgI`) or ID (`1`–`16`) |
 | `--level` / `-t` | `species` | Taxonomy level for profiling |
 | `--outdir` | — | Output directory |
@@ -432,6 +435,7 @@ fast2bRAD-M pipeline \
 | `--use-pear` | `no` | Enable PEAR merging for paired-end reads |
 | `--pear-bin` | `pear` | Path to PEAR executable |
 | `--pc` | `1` | Threads per PEAR process |
+| `--keep-enzyme-file` | `no` | Keep intermediate enzyme file after pipeline completes (`yes`/`no`) |
 | `--mock` | — | Comma-separated mock sample names (for merge filtering) |
 | `--control` | — | Comma-separated negative control names (for merge filtering) |
 | `--ko-mapping` | — | Species-to-function mapping matrix; triggers `predict` step after merge |
@@ -505,8 +509,8 @@ results/
 │   └── .done
 │
 ├── 02_db_qual/                    # Step 2: Qualitative database
-│   ├── BcgI.enzyme.iibdb          # All genome tags
-│   ├── BcgI.species.iibdb         # Species-unique tags
+│   ├── BcgI.enzyme.iibdb          # All genome tags (removed unless --keep-enzyme-file yes)
+│   ├── BcgI.species.iibdb         # Species-unique tags (zstd-compressed)
 │   ├── abfh_classify_with_speciename.txt.gz
 │   └── .done
 │
@@ -544,11 +548,17 @@ results/
 
 ## Binary File Format
 
-Fast2bRAD-M uses a compact binary format (`.iibsp` / `.iibdb`) for storing hashed 2bRAD tags:
+Fast2bRAD-M uses two binary formats:
 
-- Each record: `[8-byte u64 hash][4-byte u32 id_length][id_bytes...]`
+**Legacy format** (`.iibsp` / `.iibdb` for sample tags and enzyme intermediate files):
+- Each record: `[8-byte u64 hash][2-byte u16 id_length][id_bytes...]`
 - Tags are stored as canonical (lexicographically smaller of forward/reverse-complement) FxHash values
-- This format enables fast random-access loading and minimal I/O
+- Enzyme intermediate files (`.enzyme.iibdb`) are zstd-compressed; auto-detected on read
+
+**Compact format** (`.iibdb` for level-specific databases, e.g. `BcgI.species.iibdb`):
+- Header: `[4-byte magic "IIBC"][4-byte version][4-byte gcf_count][GCF string table...]`
+- Records: `[8-byte u64 hash][4-byte u32 gcf_index]` — zstd-compressed (v2)
+- ~83% smaller per record vs legacy format (12 bytes vs ~70 bytes)
 
 ---
 

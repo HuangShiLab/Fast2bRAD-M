@@ -11,32 +11,33 @@ use tracing;
 /// Select genomes for quantification based on qualitative results
 #[derive(Parser, Debug)]
 pub struct FindGenomeArgs {
-    /// sample list file (TSV format: sample_name<tab>...)
-    #[arg(short = 'l', long = "list")]
+    // ── Input ──
+    /// Sample list file (TSV: sample_name<TAB>...)
+    #[arg(short = 'l', long = "list", help_heading = "Input")]
     pub sample_list: PathBuf,
-
-    /// database directory
-    #[arg(short = 'd', long = "database")]
+    /// Qualitative database directory (containing classify file)
+    #[arg(short = 'd', long = "database", help_heading = "Input")]
     pub database_dir: PathBuf,
-
-    /// output directory
-    #[arg(short = 'o', long = "output")]
-    pub output_dir: PathBuf,
-
-    /// qualitative results directory
-    #[arg(long = "qual-dir", alias = "qualdir")]
+    /// Qualitative results directory (output from quantify in qualitative mode)
+    #[arg(long = "qual-dir", alias = "qualdir", help_heading = "Input")]
     pub qual_dir: PathBuf,
 
-    /// G-score threshold (default 5, meaning >5)
-    #[arg(long = "gscore", default_value = "5")]
-    pub g_score_threshold: i32,
+    // ── Output ──
+    /// Output directory (per-sample sdb.list files will be written here)
+    #[arg(short = 'o', long = "output", help_heading = "Output")]
+    pub output_dir: PathBuf,
 
-    /// minimum detected tags per GCF (default 1, meaning >1)
-    #[arg(long = "gcf", default_value = "1")]
+    // ── Filtering ──
+    /// G-score threshold: GCFs with G-score <= this value are excluded
+    #[arg(long = "gscore", default_value = "5", help_heading = "Filtering")]
+    pub g_score_threshold: i32,
+    /// Minimum detected tags per GCF: GCFs with fewer tags are excluded
+    #[arg(long = "gcf", default_value = "1", help_heading = "Filtering")]
     pub gcf_threshold: i32,
 
-    /// thread count (for parallel sample processing)
-    #[arg(short = 'j', long = "threads", default_value = "4")]
+    // ── Performance ──
+    /// Number of parallel threads
+    #[arg(short = 'j', long = "threads", default_value = "4", help_heading = "Performance")]
     pub threads: usize,
 }
 

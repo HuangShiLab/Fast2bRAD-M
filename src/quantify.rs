@@ -1,32 +1,54 @@
-use anyhow::{bail, Context, Result, anyhow};
+use anyhow::{bail, Result, anyhow};
 use clap::Parser;
 use fxhash::FxHashMap;
 use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing;
 
 use crate::enzymes::{enzyme_by_id, enzyme_by_name};
 use crate::io_utils;
 
+// Interned string type: Arc<str> allows cheap cloning (atomic refcount increment)
+// instead of full heap allocation for each String::clone()
+type Istr = Arc<str>;
+
 #[derive(Parser, Debug)]
 pub struct QuantifyArgs {
-    #[arg(short = 'l', long = "list")]
+    // ── Input ──
+    /// Sample list file (TSV: sample_name<TAB>path_to.iibsp)
+    #[arg(short = 'l', long = "list", help_heading = "Input")]
     pub sample_list: PathBuf,
-    #[arg(short = 'd', long = "database")]
+    /// Database directory (containing {enzyme}.{level}.iibdb and classify file)
+    #[arg(short = 'd', long = "database", help_heading = "Input")]
     pub database_dir: PathBuf,
-    #[arg(short = 't', long = "taxonomy")]
+    /// Taxonomy level: kingdom|phylum|class|order|family|genus|species|strain
+    #[arg(short = 't', long = "taxonomy", help_heading = "Input")]
     pub taxonomy_level: String,
-    #[arg(short = 's', long = "site")]
+    /// Enzyme name (e.g. BcgI) or numeric ID (1–16)
+    #[arg(short = 's', long = "site", help_heading = "Input")]
     pub enzyme_site: String,
-    #[arg(short = 'o', long = "output")]
+
+    // ── Output ──
+    /// Output directory
+    #[arg(short = 'o', long = "output", help_heading = "Output")]
     pub output_dir: PathBuf,
-    #[arg(short = 'g', long = "gscore", default_value = "0")]
+
+    // ── Filtering ──
+    /// G-score threshold: taxa with G-score below this are excluded (0=no filtering)
+    #[arg(short = 'g', long = "gscore", default_value = "0", help_heading = "Filtering")]
     pub g_score_threshold: f64,
-    #[arg(short = 'v', long = "verbose", default_value = "yes")]
+
+    // ── Options ──
+    /// Output per-tag detail files (yes/no)
+    #[arg(short = 'v', long = "verbose", default_value = "yes", help_heading = "Options")]
     pub verbose: String,
-    #[arg(short = 'j', long = "threads", default_value = "4")]
+
+    // ── Performance ──
+    /// Number of parallel threads
+    #[arg(short = 'j', long = "threads", default_value = "4", help_heading = "Performance")]
     pub threads: usize,
 }
 
@@ -53,6 +75,16 @@ impl AbundanceStats {
     }
 }
 
+// Pre-computed theory stats per taxon (replaces 3-level nested HashMap)
+struct TaxonTheory {
+    /// Pre-computed: total_unique_tags / gcf_count
+    theoretical_tag_num: f64,
+    /// Per-GCF unique tag count (for GCF_detected output)
+    gcf_unique_tag_count: FxHashMap<Istr, usize>,
+}
+
+type TaxonTheoryMap = FxHashMap<Istr, TaxonTheory>;
+
 pub fn run(args: QuantifyArgs) -> Result<()> {
     let _ = rayon::ThreadPoolBuilder::new().num_threads(args.threads).build_global();
     let verbose = args.verbose.to_lowercase() == "yes";
@@ -66,7 +98,6 @@ pub fn run(args: QuantifyArgs) -> Result<()> {
     tracing::info!("COMMAND: quantify -l {} -d {} -t {} -s {} -o {} -g {} -v {} -j {}", args.sample_list.display(), args.database_dir.display(), args.taxonomy_level, args.enzyme_site, args.output_dir.display(), args.g_score_threshold, args.verbose, args.threads);
 
     std::fs::create_dir_all(&args.output_dir)?;
-    // [update] read .iibdb suffix
     let db_file = args.database_dir.join(format!("{}.{}.iibdb", enzyme.name, tax_level));
     let classify_file = args.database_dir.join("abfh_classify_with_speciename.txt.gz");
 
@@ -74,7 +105,7 @@ pub fn run(args: QuantifyArgs) -> Result<()> {
     if !classify_file.exists() { bail!("Taxonomy file not found"); }
 
     tracing::info!("### Loading database: {}", db_file.display());
-    let (tag_to_gcfs, gcf_to_taxonomy, tag_theory_num) = load_database(&db_file, &classify_file, &args.taxonomy_level)?;
+    let (tag_to_gcfs, gcf_to_taxonomy, taxon_theory) = load_database(&db_file, &classify_file, &args.taxonomy_level)?;
     tracing::info!("### Database loaded");
 
     let samples = read_sample_list(&args.sample_list)?;
@@ -82,7 +113,7 @@ pub fn run(args: QuantifyArgs) -> Result<()> {
 
     samples.par_iter().for_each(|(sample_name, sample_data)| {
         tracing::info!(">>> ({}) Sample analysis started", sample_name);
-        let result = process_sample(sample_name, sample_data, &tag_to_gcfs, &gcf_to_taxonomy, &tag_theory_num, enzyme, &args.output_dir, args.g_score_threshold, verbose);
+        let result = process_sample(sample_name, sample_data, &tag_to_gcfs, &gcf_to_taxonomy, &taxon_theory, enzyme, &args.output_dir, args.g_score_threshold, verbose);
         match result {
             Ok(_) => tracing::info!("<<< ({}) Sample analysis completed", sample_name),
             Err(e) => tracing::error!("!!! ({}) Error: {}", sample_name, e),
@@ -112,10 +143,14 @@ fn read_sample_list(list_path: &Path) -> Result<Vec<(String, PathBuf)>> {
     Ok(samples)
 }
 
-fn load_database(db_file: &Path, classify_file: &Path, tax_level: &str) -> Result<(FxHashMap<u64, Vec<String>>, FxHashMap<String, String>, FxHashMap<String, FxHashMap<String, FxHashMap<u64, usize>>>)> {
+fn load_database(
+    db_file: &Path,
+    classify_file: &Path,
+    tax_level: &str,
+) -> Result<(FxHashMap<u64, Vec<Istr>>, FxHashMap<Istr, Istr>, TaxonTheoryMap)> {
     let level_index = get_taxonomy_level_index(tax_level);
-    let mut gcf_to_taxonomy: FxHashMap<String, String> = FxHashMap::default();
 
+    // Step 1: Read classify file, intern taxonomy strings
     let content = if classify_file.to_str().unwrap().ends_with(".gz") {
         use flate2::read::GzDecoder; use std::io::Read;
         let file = File::open(classify_file)?;
@@ -123,41 +158,73 @@ fn load_database(db_file: &Path, classify_file: &Path, tax_level: &str) -> Resul
         let mut c = String::new(); decoder.read_to_string(&mut c)?; c
     } else { std::fs::read_to_string(classify_file)? };
 
+    // Intern pool: deduplicates taxonomy strings so identical values share one Arc
+    let mut taxonomy_intern: FxHashMap<String, Istr> = FxHashMap::default();
+    // Temporary map: gcf_id (String) → taxonomy (Arc<str>)
+    let mut classify_map: FxHashMap<String, Istr> = FxHashMap::default();
+
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') { continue; }
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() <= level_index { continue; }
         let gcf_id = parts[0].to_string();
-        let taxonomy = parts[1..=level_index].join("\t");
-        gcf_to_taxonomy.insert(gcf_id, taxonomy);
+        let taxonomy_str = parts[1..=level_index].join("\t");
+        let taxonomy_arc = taxonomy_intern.entry(taxonomy_str.clone())
+            .or_insert_with(|| Arc::from(taxonomy_str.as_str()))
+            .clone();
+        classify_map.insert(gcf_id, taxonomy_arc);
     }
+    drop(taxonomy_intern); // no longer needed
 
-    let mut tag_to_gcfs: FxHashMap<u64, Vec<String>> = FxHashMap::default();
-    let mut tag_theory_num: FxHashMap<String, FxHashMap<String, FxHashMap<u64, usize>>> = FxHashMap::default();
-    let mut reader = io_utils::open_binary_reader(db_file)?;
-    let mut id_buffer = String::with_capacity(256); // reuse
+    // Step 2: Read compact DB, build interned GCF table
+    let mut compact_reader = io_utils::open_compact_reader(db_file)?;
+    let gcf_intern: Vec<Istr> = compact_reader.gcf_table()
+        .iter()
+        .map(|s| Arc::from(s.as_str()))
+        .collect();
+
+    // Step 3: Build gcf_to_taxonomy with interned keys
+    let mut gcf_to_taxonomy: FxHashMap<Istr, Istr> = FxHashMap::default();
+    for gcf_arc in &gcf_intern {
+        if let Some(taxonomy) = classify_map.get(gcf_arc.as_ref()) {
+            gcf_to_taxonomy.insert(gcf_arc.clone(), taxonomy.clone());
+        }
+    }
+    drop(classify_map); // no longer needed
+
+    // Step 4: Load tag records
+    let mut tag_to_gcfs: FxHashMap<u64, Vec<Istr>> = FxHashMap::default();
+    let mut gcf_tag_counts: FxHashMap<Istr, FxHashMap<Istr, usize>> = FxHashMap::default();
     let mut loaded_count = 0usize;
 
-    while let Some(hash_val) = reader.next_record_reuse(&mut id_buffer)? {
-        let mut parts = id_buffer.split('|');
-        let gcf_id = parts.next().unwrap_or("");
-        // skip index, scaffold, pos, strand (4 fields)
-        let unique_flag = parts.nth(4).unwrap_or("0");
-        // compatible with old format ("-") and new format ("1")
-        if unique_flag != "1" && unique_flag != "-" { continue; }
-        if gcf_id.is_empty() { continue; }
+    while let Some((hash_val, gcf_index)) = compact_reader.next_record()? {
+        let gcf_id = &gcf_intern[gcf_index as usize];
 
         if let Some(taxonomy) = gcf_to_taxonomy.get(gcf_id) {
-            tag_to_gcfs.entry(hash_val).or_insert_with(Vec::new).push(gcf_id.to_string());
-            *tag_theory_num.entry(taxonomy.clone()).or_insert_with(FxHashMap::default)
-                .entry(gcf_id.to_string()).or_insert_with(FxHashMap::default)
-                .entry(hash_val).or_insert(0) += 1;
+            // Arc::clone() = atomic refcount increment (cheap, no heap alloc)
+            tag_to_gcfs.entry(hash_val).or_default().push(gcf_id.clone());
+            *gcf_tag_counts.entry(taxonomy.clone())
+                .or_default()
+                .entry(gcf_id.clone())
+                .or_insert(0) += 1;
             loaded_count += 1;
         }
     }
+
+    // Step 5: Convert to pre-computed TaxonTheory
+    let mut taxon_theory: TaxonTheoryMap = FxHashMap::default();
+    for (taxonomy, gcf_counts) in gcf_tag_counts {
+        let gcf_count = gcf_counts.len();
+        let total: usize = gcf_counts.values().sum();
+        taxon_theory.insert(taxonomy, TaxonTheory {
+            theoretical_tag_num: total as f64 / gcf_count as f64,
+            gcf_unique_tag_count: gcf_counts,
+        });
+    }
+
     tracing::info!("Successfully loaded {} valid unique tag entries from database", loaded_count);
-    Ok((tag_to_gcfs, gcf_to_taxonomy, tag_theory_num))
+    Ok((tag_to_gcfs, gcf_to_taxonomy, taxon_theory))
 }
 
 fn get_taxonomy_level_index(level: &str) -> usize {
@@ -167,27 +234,28 @@ fn get_taxonomy_level_index(level: &str) -> usize {
 fn process_sample(
     sample_name: &str,
     sample_data: &Path,
-    tag_to_gcfs: &FxHashMap<u64, Vec<String>>,
-    gcf_to_taxonomy: &FxHashMap<String, String>,
-    tag_theory_num: &FxHashMap<String, FxHashMap<String, FxHashMap<u64, usize>>>,
+    tag_to_gcfs: &FxHashMap<u64, Vec<Istr>>,
+    gcf_to_taxonomy: &FxHashMap<Istr, Istr>,
+    taxon_theory: &TaxonTheoryMap,
     enzyme: &crate::enzymes::Enzyme,
     output_dir: &Path,
     g_score_threshold: f64,
     verbose: bool,
 ) -> Result<()> {
-    let mut tag_num: FxHashMap<String, FxHashMap<u64, usize>> = FxHashMap::default();
-    let mut detected_gcf_tag: FxHashMap<String, FxHashMap<String, fxhash::FxHashSet<u64>>> = FxHashMap::default();
+    // All .clone() calls on Istr (Arc<str>) are O(1) atomic increments — no heap allocation
+    let mut tag_num: FxHashMap<Istr, FxHashMap<u64, usize>> = FxHashMap::default();
+    let mut detected_gcf_tag: FxHashMap<Istr, FxHashMap<Istr, fxhash::FxHashSet<u64>>> = FxHashMap::default();
     let mut reader = io_utils::open_binary_reader(sample_data)?;
-    let mut ignored_id_buf = String::with_capacity(128); // reuse
+    let mut ignored_id_buf = String::with_capacity(128);
 
     while let Some(tag_hash) = reader.next_record_reuse(&mut ignored_id_buf)? {
         if let Some(gcf_list) = tag_to_gcfs.get(&tag_hash) {
             if let Some(first_gcf) = gcf_list.first() {
                 if let Some(taxonomy) = gcf_to_taxonomy.get(first_gcf) {
-                    *tag_num.entry(taxonomy.clone()).or_insert_with(FxHashMap::default).entry(tag_hash).or_insert(0) += 1;
+                    *tag_num.entry(taxonomy.clone()).or_default().entry(tag_hash).or_insert(0) += 1;
                     for gcf_id in gcf_list {
-                        detected_gcf_tag.entry(taxonomy.clone()).or_insert_with(FxHashMap::default)
-                            .entry(gcf_id.clone()).or_insert_with(fxhash::FxHashSet::default).insert(tag_hash);
+                        detected_gcf_tag.entry(taxonomy.clone()).or_default()
+                            .entry(gcf_id.clone()).or_default().insert(tag_hash);
                     }
                 }
             }
@@ -201,21 +269,21 @@ fn process_sample(
     let gcf_detected_file = sample_dir.join(format!("{}.{}.GCF_detected.xls", sample_name, enzyme.name));
     let mut gcf_writer = BufWriter::new(File::create(&gcf_detected_file)?);
 
-    let mut taxonomy_list: Vec<&String> = detected_gcf_tag.keys().collect();
-    taxonomy_list.sort();
+    let mut taxonomy_list: Vec<&Istr> = detected_gcf_tag.keys().collect();
+    taxonomy_list.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
 
     for taxonomy in taxonomy_list {
         let gcf_map = &detected_gcf_tag[taxonomy];
-        let mut gcf_list: Vec<&String> = gcf_map.keys().collect();
-        gcf_list.sort();
+        let mut gcf_list: Vec<&Istr> = gcf_map.keys().collect();
+        gcf_list.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
         for gcf_id in gcf_list {
             let detected_tags = &gcf_map[gcf_id];
             let detected_tag_num = detected_tags.len();
-            let gcf_all_theory_num = if let Some(gcf_tags) = tag_theory_num.get(taxonomy) {
-                if let Some(tags) = gcf_tags.get(gcf_id) { tags.len() } else { 0 }
+            let gcf_all_theory_num = if let Some(theory) = taxon_theory.get(taxonomy) {
+                theory.gcf_unique_tag_count.get(gcf_id).copied().unwrap_or(0)
             } else { 0 };
             let percent = if gcf_all_theory_num > 0 { detected_tag_num as f64 / gcf_all_theory_num as f64 } else { 0.0 };
-            writeln!(gcf_writer, "{}\t{}\t{}\t{}\t{:.4}", taxonomy, gcf_id, gcf_all_theory_num, detected_tag_num, percent)?;
+            writeln!(gcf_writer, "{}\t{}\t{}\t{}\t{:.4}", taxonomy.as_ref(), gcf_id.as_ref(), gcf_all_theory_num, detected_tag_num, percent)?;
         }
     }
 
@@ -227,9 +295,8 @@ fn process_sample(
 
     for (taxonomy, tags) in &tag_num {
         let mut stats = AbundanceStats::default();
-        if let Some(gcf_tags) = tag_theory_num.get(taxonomy) {
-            let total_theory: usize = gcf_tags.values().map(|tags| tags.values().sum::<usize>()).sum();
-            stats.theoretical_tag_num = total_theory as f64 / gcf_tags.len() as f64;
+        if let Some(theory) = taxon_theory.get(taxonomy) {
+            stats.theoretical_tag_num = theory.theoretical_tag_num;
         }
         stats.sequenced_tag_num = tags.len();
         stats.sequenced_reads_num = tags.values().sum();
@@ -237,7 +304,7 @@ fn process_sample(
         let g_score = stats.g_score();
         if g_score < g_score_threshold { continue; }
 
-        writeln!(writer, "{}\t{:.8}\t{}\t{:.8}%\t{}\t{:.8}\t{:.8}\t{}\t{:.8}", taxonomy, stats.theoretical_tag_num, stats.sequenced_tag_num, stats.percent(), stats.sequenced_reads_num, stats.reads_per_theoretical(), stats.reads_per_sequenced(), stats.sequenced_tag_num_gt1, g_score)?;
+        writeln!(writer, "{}\t{:.8}\t{}\t{:.8}%\t{}\t{:.8}\t{:.8}\t{}\t{:.8}", taxonomy.as_ref(), stats.theoretical_tag_num, stats.sequenced_tag_num, stats.percent(), stats.sequenced_reads_num, stats.reads_per_theoretical(), stats.reads_per_sequenced(), stats.sequenced_tag_num_gt1, g_score)?;
 
         if verbose {
             let output_name = taxonomy.split('\t').last().unwrap_or("unknown");
