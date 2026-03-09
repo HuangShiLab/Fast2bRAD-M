@@ -1,3 +1,0 @@
-#Kingdom	Phylum	Class	Order	Family	Genus	Species	Theoretical_Tag_Num	Sequenced_Tag_Num	Percent	Sequenced_Reads_Num	Sequenced_Reads_Num/Theoretical_Tag_Num	Sequenced_Reads_Num/Sequenced_Tag_Num	Sequenced_Tag_Num(depth>1)	G_Score
-Bacteria	Actinobacteriota	Actinomycetia	Propionibacteriales	Propionibacteriaceae	Cutibacterium	Cutibacterium_acnes	2654.20000000	3974	149.72496421%	20478	7.71531912	5.15299446	3735	9021.06268685
-Bacteria	Proteobacteria	Gammaproteobacteria	Enterobacterales	Enterobacteriaceae	Escherichia	Escherichia_coli	3101.40000000	3071	99.01979751%	12401	3.99851680	4.03809834	2817	6171.18068120
