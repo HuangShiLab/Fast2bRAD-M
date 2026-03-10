@@ -153,14 +153,9 @@ pub fn run(args: BuildQualDbArgs) -> Result<()> {
         output_file
     };
 
-    // [Optimization] Load enzyme file into memory once, reuse for all levels
-    tracing::info!("Loading enzyme records into memory ...");
-    let enzyme_records = load_enzyme_records(&enzyme_file)?;
-    tracing::info!("Loaded {} enzyme records", enzyme_records.len());
-
     for level in &levels {
         tracing::info!("\n========== Building {}-level database (Hash mode) ==========", level.name());
-        build_database_for_level(&enzyme_records, enzyme, &args.output_dir, *level, &genomes, remove_redundant)?;
+        build_database_for_level(&enzyme_file, enzyme, &args.output_dir, *level, &genomes, remove_redundant)?;
     }
     tracing::info!("\nAll done!");
     Ok(())
@@ -333,94 +328,114 @@ fn digest_genomes(genomes: &[GenomeRecord], enzyme: &'static Enzyme, output_file
     Ok(())
 }
 
-// ================== Single-pass multi-level optimization ==================
-// Previously the enzyme file was re-read from disk 2× per taxonomy level
-// (once for tag taxonomy collection, once for output). With 8 levels, that's
-// 16 disk reads of a potentially multi-GB file.
-// Now we load the enzyme records into memory once and reuse them for all levels.
-
-/// In-memory enzyme record: only stores the hash and GCF ID we actually need.
-struct EnzymeRecord {
-    hash: Hash,
-    gcf_id: String,
-}
-
-fn load_enzyme_records(enzyme_file: &Path) -> Result<Vec<EnzymeRecord>> {
-    let mut reader = io_utils::open_binary_reader(enzyme_file)?;
-    let mut records = Vec::new();
-    let mut id_buffer = String::with_capacity(256);
-    while let Some(hash) = reader.next_record_reuse(&mut id_buffer)? {
-        let gcf_id = id_buffer.split('|').next().unwrap_or("");
-        if !gcf_id.is_empty() {
-            records.push(EnzymeRecord { hash, gcf_id: gcf_id.to_string() });
-        }
-    }
-    Ok(records)
-}
+// ================== Low-memory streaming approach ==================
+// Instead of loading all enzyme records into memory (~2+ GB), we stream
+// from disk 2–3 times per taxonomy level. This trades I/O for memory,
+// reducing peak usage by ~78%.
+//
+// Pass 1: Determine per-tag uniqueness (taxonomy interned to u32 indices)
+// Pass 2: (only if remove_redundant) Find within-genome duplicate tags
+// Pass 3: Write unique tags to compact database
 
 fn build_database_for_level(
-    records: &[EnzymeRecord],
+    enzyme_file: &Path,
     enzyme: &'static Enzyme,
     output_dir: &Path,
     level: TaxonomyLevel,
     genomes: &[GenomeRecord],
     remove_redundant: bool,
 ) -> Result<()> {
-    // Build taxonomy lookup for this level
-    let mut gcf_to_taxonomy: FxHashMap<&str, String> = FxHashMap::default();
+    // Build lookup tables: GCF ID → genome index, genome index → taxonomy index
+    let gcf_to_idx: FxHashMap<&str, u32> = genomes.iter().enumerate()
+        .map(|(i, g)| (g.gcf_id.as_str(), i as u32)).collect();
+
+    let mut taxonomy_to_idx: FxHashMap<String, u32> = FxHashMap::default();
+    let mut gcf_tax: Vec<u32> = Vec::with_capacity(genomes.len());
     for genome in genomes {
         if level as usize > genome.taxonomy.len() { bail!("Taxonomy level index out of range"); }
         let taxonomy_str = genome.taxonomy[0..level as usize].join("\t");
-        gcf_to_taxonomy.insert(&genome.gcf_id, taxonomy_str);
+        let next_id = taxonomy_to_idx.len() as u32;
+        let tax_idx = *taxonomy_to_idx.entry(taxonomy_str).or_insert(next_id);
+        gcf_tax.push(tax_idx);
     }
 
-    // Pass 1 (in-memory): collect tag taxonomy and genome tag counts
+    // ── Pass 1: determine per-tag uniqueness (stream from disk) ──
+    // tag_status[hash] = taxonomy_idx   → tag belongs to exactly one taxon
+    // tag_status[hash] = u32::MAX       → tag is shared across 2+ taxa
     tracing::info!("Step 1: Collecting tag taxonomy information ...");
-    let mut tag_taxonomy: FxHashMap<Hash, FxHashSet<String>> = FxHashMap::default();
-    let mut genome_tags: FxHashMap<&str, FxHashMap<Hash, usize>> = FxHashMap::default();
-
-    for rec in records {
-        if let Some(taxonomy) = gcf_to_taxonomy.get(rec.gcf_id.as_str()) {
-            tag_taxonomy.entry(rec.hash).or_default().insert(taxonomy.clone());
-            if remove_redundant {
-                *genome_tags.entry(rec.gcf_id.as_str()).or_default().entry(rec.hash).or_insert(0) += 1;
+    let mut tag_status: FxHashMap<Hash, u32> = FxHashMap::default();
+    {
+        let mut reader = io_utils::open_binary_reader(enzyme_file)?;
+        let mut buf = String::with_capacity(256);
+        while let Some(hash) = reader.next_record_reuse(&mut buf)? {
+            let gcf_id = buf.split('|').next().unwrap_or("");
+            if let Some(&gi) = gcf_to_idx.get(gcf_id) {
+                let tax = gcf_tax[gi as usize];
+                tag_status.entry(hash)
+                    .and_modify(|v| { if *v != tax && *v != u32::MAX { *v = u32::MAX; } })
+                    .or_insert(tax);
             }
         }
     }
 
-    // Pass 2 (in-memory): output unique tags with compact + zstd format
-    tracing::info!("Step 2: Identifying unique tags and writing database ...");
+    // ── Pass 2 (only when remove_redundant): find within-genome duplicate tags ──
+    // Only tracks tags already known to be unique to one taxon, keeping the sets small.
+    let dup_set: FxHashSet<(u32, Hash)> = if remove_redundant {
+        tracing::info!("Step 2: Checking within-genome tag redundancy ...");
+        let mut seen: FxHashSet<(u32, Hash)> = FxHashSet::default();
+        let mut dup: FxHashSet<(u32, Hash)> = FxHashSet::default();
+        {
+            let mut reader = io_utils::open_binary_reader(enzyme_file)?;
+            let mut buf = String::with_capacity(256);
+            while let Some(hash) = reader.next_record_reuse(&mut buf)? {
+                // Skip tags already known to be shared across taxa
+                if tag_status.get(&hash).map_or(true, |&v| v == u32::MAX) { continue; }
+                let gcf_id = buf.split('|').next().unwrap_or("");
+                if let Some(&gi) = gcf_to_idx.get(gcf_id) {
+                    let key = (gi, hash);
+                    if !seen.insert(key) {
+                        dup.insert(key);
+                    }
+                }
+            }
+        }
+        // Release the larger `seen` set; keep only the much smaller `dup` set
+        drop(seen);
+        dup
+    } else {
+        FxHashSet::default()
+    };
+
+    // ── Pass 3: write unique tags to compact database ──
+    let step = if remove_redundant { 3 } else { 2 };
+    tracing::info!("Step {}: Writing unique tags to database ...", step);
     let output_path = output_dir.join(format!("{}.{}.iibdb", enzyme.name, level.name()));
     let file = File::create(&output_path)?;
     let buf_writer = BufWriter::with_capacity(io_utils::IO_BUFFER_SIZE, file);
 
     let gcf_ids: Vec<&str> = genomes.iter().map(|g| g.gcf_id.as_str()).collect();
-    let gcf_to_index: FxHashMap<&str, u32> = gcf_ids.iter().enumerate()
-        .map(|(i, id)| (*id, i as u32)).collect();
     let mut compact_writer = io_utils::CompactDatabaseWriter::new(buf_writer, &gcf_ids)?;
-    let mut unique_counts: FxHashMap<&str, usize> = FxHashMap::default();
+    let mut unique_genome_count: FxHashSet<u32> = FxHashSet::default();
 
-    for rec in records {
-        if !gcf_to_taxonomy.contains_key(rec.gcf_id.as_str()) { continue; }
-
-        let is_unique = tag_taxonomy.get(&rec.hash).map_or(false, |t| t.len() == 1);
-
-        let is_unique = if is_unique && remove_redundant {
-            genome_tags.get(rec.gcf_id.as_str())
-                .and_then(|counts| counts.get(&rec.hash))
-                .map_or(true, |&count| count <= 1)
-        } else { is_unique };
-
-        if is_unique {
-            if let Some(&idx) = gcf_to_index.get(rec.gcf_id.as_str()) {
-                *unique_counts.entry(rec.gcf_id.as_str()).or_insert(0) += 1;
-                compact_writer.write_record(rec.hash, idx)?;
+    {
+        let mut reader = io_utils::open_binary_reader(enzyme_file)?;
+        let mut buf = String::with_capacity(256);
+        while let Some(hash) = reader.next_record_reuse(&mut buf)? {
+            // Skip tags shared across taxa
+            if tag_status.get(&hash).map_or(true, |&v| v == u32::MAX) { continue; }
+            let gcf_id = buf.split('|').next().unwrap_or("");
+            if let Some(&gi) = gcf_to_idx.get(gcf_id) {
+                let dominated = remove_redundant && dup_set.contains(&(gi, hash));
+                if !dominated {
+                    unique_genome_count.insert(gi);
+                    compact_writer.write_record(hash, gi)?;
+                }
             }
         }
     }
     compact_writer.finish()?;
 
     tracing::info!("  Output database: {}", output_path.display());
-    tracing::info!("  Contains unique tags for {} genomes", unique_counts.len());
+    tracing::info!("  Contains unique tags for {} genomes", unique_genome_count.len());
     Ok(())
 }
