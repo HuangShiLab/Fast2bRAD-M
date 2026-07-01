@@ -3,6 +3,7 @@ mod build_quan_db;
 mod enzymes;
 mod extract;
 mod find_genome;
+mod inspect;
 mod io_utils;
 mod merge;
 mod pipeline;
@@ -47,6 +48,9 @@ enum Commands {
     /// Select genomes for quantification based on qualitative results
     FindGenome(find_genome::FindGenomeArgs),
 
+    /// Inspect .iibdb / .iibsp binary files: show format, tag counts and example records
+    Inspect(inspect::InspectArgs),
+
     /// Functional abundance prediction: t(species abundance table) × species function matrix = functional abundance table
     Predict(predict::PredictArgs),
 
@@ -72,6 +76,7 @@ fn main() -> Result<()> {
         Commands::Quantify(args) => quantify::run(args),
         Commands::Merge(args) => merge::run(args),
         Commands::FindGenome(args) => find_genome::run(args),
+        Commands::Inspect(args) => inspect::run(args),
         Commands::Predict(args) => predict::run(args),
         Commands::Pipeline(args) => pipeline::run(args),
     }

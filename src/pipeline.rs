@@ -197,6 +197,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
                     pear_bin:"pear".to_string(),
                     pear_threads: args.pear_threads,
                     use_pear: "no".to_string(),
+                    record_pos: false,
                 };
 
                 extract::run(ext_args).context("db-only batch reference genome extraction failed")?;
@@ -248,6 +249,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
                 pear_bin: args.pear_bin.clone().unwrap_or_else(|| "pear".to_string()),
                 pear_threads: args.pear_threads,
                 use_pear: args.use_pear.clone(),
+                record_pos: false,
             };
             extract::run(ext_args).context("extract step failed")?;
             std::fs::write(&extract_done_marker, b"ok")?;
@@ -260,7 +262,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
     // Step 2: Prepare qualitative database (02_db_qual)
     // ======================================================
     // Logic change: Database construction requires taxonomy information.
-    // Prefer --taxonomy; fall back to --genome-list if not provided (assuming the same file contains taxonomy information)
+    // Prefer --taxonomy; fall back to --list if not provided (assuming the same file contains taxonomy information)
     let effective_taxonomy_list = args.taxonomy.or(args.genome_list.clone());
 
     let qual_db_dir = if let Some(db) = args.database_dir.as_ref() {
@@ -290,7 +292,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
 
         d02.clone()
     } else {
-        bail!("--taxonomy (or --genome-list) or --database not provided; cannot build database or run analysis");
+        bail!("--taxonomy (or --list) or --database not provided; cannot build database or run analysis");
     };
 
     if args.mode == "db-only" {

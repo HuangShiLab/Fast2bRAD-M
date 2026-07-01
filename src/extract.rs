@@ -90,14 +90,23 @@ struct WriteTask {
     id_str: String,
 }
 
+/// Reference-genome record carrying the contig id and the tag's position, so the
+/// writer can emit both the position-less database file and the optional
+/// `contig|pos` file from the same stream.
+struct GenomeTask {
+    hash: Hash,
+    contig: String,
+    pos: usize,
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct ExtractArgs {
-    // ── Input (choose one of --genome-list or -i) ──
+    // ── Input (choose one of --list or -i) ──
     /// Batch mode: genome/sample list file (TSV: name<TAB>path1[<TAB>path2]). Mutually exclusive with -i
-    #[arg(long = "genome-list", conflicts_with = "input", help_heading = "Input")]
+    #[arg(short = 'l', long = "list", conflicts_with = "input", help_heading = "Input")]
     pub genome_list: Option<PathBuf>,
-    /// Single mode: one or two FASTQ/FASTA files (PE: R1 R2). Mutually exclusive with --genome-list
-    #[arg(short = 'i', long = "input", num_args = 1..=2, conflicts_with = "genome_list", help_heading = "Input")]
+    /// Single mode: one or two FASTQ/FASTA files (PE: R1 R2). Mutually exclusive with --list
+    #[arg(short = 'i', long = "input", num_args = 1..=2, conflicts_with = "list", help_heading = "Input")]
     pub input: Vec<PathBuf>,
     /// Input type: 1=reference genome, 2=shotgun reads (SE/PE), 3=single 2bRAD tags
     #[arg(short = 't', long = "type", help_heading = "Input")]
@@ -113,6 +122,12 @@ pub struct ExtractArgs {
     /// Output file prefix (only used in single mode with -i)
     #[arg(long = "op", num_args = 1, help_heading = "Output")]
     pub output_prefix: Vec<String>,
+    /// Reference genome only (-t 1): also write `{prefix}.{enzyme}.pos.iibdb`
+    /// recording each tag's position as `contig|offset` (offset = distance of the
+    /// tag's first base from its contig's first base). The default position-less
+    /// database is still written either way.
+    #[arg(long = "record-pos", help_heading = "Output")]
+    pub record_pos: bool,
 
     // ── Quality Control (for sample reads, -t 2/3) ──
     /// Enable quality control filtering (yes/no)
@@ -305,15 +320,35 @@ fn spawn_reader_thread(input_path: PathBuf) -> (
 
 fn extract_reference_genome(args: &ExtractArgs, enzyme: &'static Enzyme) -> Result<()> {
     let input_path = args.input[0].clone();
-    let output_path = args.output_dir.join(format!("{}.{}.iibdb", args.output_prefix[0], enzyme.name));
+    let prefix = args.output_prefix[0].clone();
+    // Default (position-less) database — always written.
+    let output_path = args.output_dir.join(format!("{}.{}.iibdb", prefix, enzyme.name));
+    // Optional companion file recording each tag's `contig|pos`.
+    let pos_output_path = if args.record_pos {
+        Some(args.output_dir.join(format!("{}.{}.pos.iibdb", prefix, enzyme.name)))
+    } else {
+        None
+    };
 
-    let (write_tx, write_rx) = mpsc::sync_channel::<Vec<WriteTask>>(CHANNEL_BUFFER);
+    let (write_tx, write_rx) = mpsc::sync_channel::<Vec<GenomeTask>>(CHANNEL_BUFFER);
     let writer_handle = thread::spawn(move || -> Result<()> {
         let file = File::create(&output_path).context("Failed to create output file")?;
         let mut writer = BufWriter::with_capacity(io_utils::IO_BUFFER_SIZE, file);
+        // Second writer (only when --record-pos) records id = "contig|pos".
+        let mut pos_writer = match pos_output_path {
+            Some(ref p) => {
+                let f = File::create(p).context("Failed to create position output file")?;
+                Some(BufWriter::with_capacity(io_utils::IO_BUFFER_SIZE, f))
+            }
+            None => None,
+        };
         while let Ok(batch) = write_rx.recv() {
             for task in batch {
-                io_utils::write_binary_record(&mut writer, task.hash, &task.id_str)?;
+                io_utils::write_binary_record(&mut writer, task.hash, &task.contig)?;
+                if let Some(pw) = pos_writer.as_mut() {
+                    let id = format!("{}|{}", task.contig, task.pos);
+                    io_utils::write_binary_record(pw, task.hash, &id)?;
+                }
             }
         }
         Ok(())
@@ -323,13 +358,26 @@ fn extract_reference_genome(args: &ExtractArgs, enzyme: &'static Enzyme) -> Resu
 
     let input_sequences = Arc::new(AtomicUsize::new(0));
     let total_tags = Arc::new(AtomicUsize::new(0));
+    let auto_numbered = Arc::new(AtomicUsize::new(0));
+    // Contigs are read in order; track the running base so each record gets a
+    // stable 1-based ordinal for auto-numbering.
+    let mut contig_base = 0usize;
 
     // Main thread consumer loop
     while let Ok(result) = work_rx.recv() {
         let (batch, count) = result?;
 
         // &batch[..count] is a slice; only valid records are processed
-        process_genome_batch(&batch[..count], enzyme, &write_tx, &input_sequences, &total_tags)?;
+        process_genome_batch(
+            &batch[..count],
+            enzyme,
+            &write_tx,
+            &input_sequences,
+            &total_tags,
+            contig_base,
+            &auto_numbered,
+        )?;
+        contig_base += count;
 
         // [Recycle] Return the whole container to the reader after processing
         let _ = recycle_tx.send((batch, 0));
@@ -339,9 +387,18 @@ fn extract_reference_genome(args: &ExtractArgs, enzyme: &'static Enzyme) -> Resu
     let _ = reader_handle.join();
     writer_handle.join().unwrap()?;
 
-    let stat_path = args.output_dir.join(format!("{}.{}.stat.tsv", args.output_prefix[0], enzyme.name));
+    let auto_n = auto_numbered.load(Ordering::Relaxed);
+    if auto_n > 0 {
+        tracing::warn!(
+            "Genome {}: {} contig(s) had no sequence ID in the FASTA header; they were auto-numbered as contig<N> (N = 1-based contig order).",
+            prefix,
+            auto_n
+        );
+    }
+
+    let stat_path = args.output_dir.join(format!("{}.{}.stat.tsv", prefix, enzyme.name));
     let stats = DigestStats {
-        sample_id: args.output_prefix[0].clone(),
+        sample_id: prefix.clone(),
         enzyme: enzyme.name.to_string(),
         input_sequences: input_sequences.load(Ordering::Relaxed),
         tag_count: total_tags.load(Ordering::Relaxed),
@@ -354,31 +411,40 @@ fn extract_reference_genome(args: &ExtractArgs, enzyme: &'static Enzyme) -> Resu
 fn process_genome_batch(
     batch: &[RawRecord], // changed to slice
     enzyme: &Enzyme,
-    tx: &mpsc::SyncSender<Vec<WriteTask>>,
+    tx: &mpsc::SyncSender<Vec<GenomeTask>>,
     count_seq: &AtomicUsize,
     count_tag: &AtomicUsize,
+    contig_base: usize,
+    auto_numbered: &AtomicUsize,
 ) -> Result<()> {
     count_seq.fetch_add(batch.len(), Ordering::Relaxed);
 
-    let results: Vec<WriteTask> = batch.par_iter().flat_map(|record| {
+    // enumerate() over the indexed parallel iterator yields each record's position
+    // within the batch, giving a stable global contig ordinal (contig_base + i).
+    let results: Vec<GenomeTask> = batch.par_iter().enumerate().flat_map(|(local_idx, record)| {
         // record.seq is already a Vec<u8>; convert to uppercase.
         let mut sequence = record.seq.clone();
         sequence.make_ascii_uppercase();
 
         let positions_iter = enzyme.find_all_tags(&sequence);
-        let mut tasks = Vec::new();
-        // ID handling: RawRecord.id is Vec<u8>; convert to string here,
-        // moving the UTF-8 check into the parallel thread
-        let id_utf8 = String::from_utf8_lossy(&record.id);
-        // Fastx IDs often contain spaces; take the first token
-        let seq_id = id_utf8.split_whitespace().next().unwrap_or("seq");
 
+        // Contig id = first whitespace token of the header. If the header has no
+        // id (empty/whitespace only), auto-number it and count it for the warning.
+        let id_utf8 = String::from_utf8_lossy(&record.id);
+        let contig = match id_utf8.split_whitespace().next() {
+            Some(tok) => tok.to_string(),
+            None => {
+                auto_numbered.fetch_add(1, Ordering::Relaxed);
+                format!("contig{}", contig_base + local_idx + 1)
+            }
+        };
+
+        let mut tasks = Vec::new();
         for (pos, len) in positions_iter {
             if pos + len > sequence.len() { continue; }
             let tag_seq = &sequence[pos..pos + len];
             let hash = canonical_hash(tag_seq);
-            let id_str = format!("{}:{}", seq_id, pos);
-            tasks.push(WriteTask { hash, id_str });
+            tasks.push(GenomeTask { hash, contig: contig.clone(), pos });
         }
         tasks
     }).collect();

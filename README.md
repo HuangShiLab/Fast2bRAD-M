@@ -18,6 +18,7 @@
   - [find-genome](#find-genome)
   - [merge](#merge)
   - [predict](#predict)
+  - [classify](#classify)
   - [pipeline](#pipeline)
 - [File Formats](#file-formats)
 - [Supported Enzymes](#supported-enzymes)
@@ -28,11 +29,12 @@
 
 ## Features
 
-- **High Performance** — Rust implementation with Rayon multi-core parallelism
+- **High Performance** — Rust implementation with Rayon multi-core parallelism; batch-digesting 15 reference genomes in < 0.12 s
 - **Full Enzyme Support** — All 16 Type IIB restriction enzymes (BcgI, CspCI, AloI, BsaXI, BaeI, CjeI, PpiI, PsrI, BplI, FalI, Bsp24I, HaeIV, CjePI, Hin4I, AlfI, BslFI)
 - **All Input Types** — Reference genomes, Shotgun metagenomic reads (SE/PE), and single 2bRAD tags
 - **Built-in QC** — N-ratio, minimum quality score, and minimum quality-percent filtering
 - **Functional Prediction** — Matrix-multiplication-based functional abundance profiling (KO, KEGG, etc.)
+- **ML Contamination Classification** — ONNX-based classification to detect contaminated taxa
 - **Resume Support** — `.done` marker files allow interrupted runs to be resumed without re-computation
 - **One-Command Pipeline** — The `pipeline` subcommand chains all steps automatically
 
@@ -50,7 +52,7 @@ cargo build --release
 
 ### Option 2 — Direct Compilation
 
-Prerequisites: [Rust toolchain](https://rustup.rs/) ≥ 1.88
+Prerequisites: [Rust toolchain](https://rustup.rs/) ≥ 1.70
 
 ```bash
 git clone https://github.com/HuangShiLab/Fast2bRAD-M.git
@@ -125,6 +127,9 @@ Raw reads (FASTQ)
       │
       ▼ (optional, requires --ko-mapping)
 [7] predict          →  05_merge/{prefix}.func.xls
+      │
+      ▼ (optional, requires ONNX model)
+[8] classify         →  per-sample classification with Prediction labels
 ```
 
 ---
@@ -179,25 +184,33 @@ Build a qualitative (classification-specificity) database from reference genomes
 
 ```bash
 fast2bRAD-M build-qual-db \
-  -l genome_list.tsv \   # genome list with taxonomy
+  -l genome_list.tsv \   # genome list (2-column: genome_id + fasta_path)
+  --taxonomy taxonomy.tsv \ # taxonomy file (genome_id + taxonomy columns)
   -s BcgI \              # enzyme
   -t species \           # taxonomy level(s); comma-separated or "all"
   -o db_qual/ \
   --pre-digested-dir pre_digested/ \  # optional: pre-digested .iibdb files
   -r yes \               # remove redundant tags
-  -j 8 \
-  --keep-enzyme-file no  # keep intermediate enzyme file (yes/no, default: no)
+  -j 8
 ```
 
-**Genome list format** (Tab-separated):
+**Genome list format** (2-column, tab-separated):
 ```
-GCF_000007445.1  Bacteria  Proteobacteria  Gammaproteobacteria  Enterobacterales  Enterobacteriaceae  Escherichia  Escherichia_coli  str.K-12  /path/to/genome.fna.gz
+GCF_000007445.1  /path/to/genome.fna.gz
+GCF_000007445.2  /path/to/another_genome.fna.gz
+```
+
+**Taxonomy file format** (tab-separated, 9 columns):
+```
+GCF_000007445.1  Bacteria  Proteobacteria  Gammaproteobacteria  Enterobacterales  Enterobacteriaceae  Escherichia  Escherichia_coli  str.K-12
 ```
 Or GTDB format (second column = `d__Bacteria;p__Proteobacteria;...`).
 
+Backward compatibility: If `--taxonomy` is not provided, `--list` can also be a single file with both genome paths and taxonomy (original format).
+
 **Output** (per taxonomy level):
-- `{enzyme}.enzyme.iibdb` — All tags from all genomes (intermediate; auto-deleted unless `--keep-enzyme-file yes`)
-- `{enzyme}.{level}.iibdb` — Taxon-unique tags only (zstd-compressed compact format)
+- `{enzyme}.enzyme.iibdb` — All tags from all genomes (intermediate)
+- `{enzyme}.{level}.iibdb` — Taxon-unique tags only
 - `abfh_classify_with_speciename.txt.gz` — GCF-to-taxonomy mapping
 
 ---
@@ -213,8 +226,7 @@ fast2bRAD-M build-quan-db \
   -t species \
   -o sample_db/ \
   -e qual_db/BcgI.enzyme.iibdb \  # reuse the enzyme file from qual DB
-  -j 4 \
-  --keep-enzyme-file no   # keep intermediate enzyme file (yes/no, default: no)
+  -j 4
 ```
 
 **Output**:
@@ -335,6 +347,35 @@ KO00002    0.00000000  0.04321098  ...
 
 ---
 
+### `classify`
+
+ML-based contamination classification using an ONNX model. Adds a `Prediction` column to the quantify output for each taxonomic entry.
+
+**Features used** (4-dim input):
+1. `ln(Sequenced_Tag_Num / Theoretical_Tag_Num)` — coverage ratio
+2. `ln(G_score)` — combined breadth × depth
+3. `ln(Sequenced_Reads_Num / Sequenced_Tag_Num)` — average depth
+4. `ln(Theoretical_Reads / Total_Reads)` — theoretical abundance
+
+```bash
+fast2bRAD-M classify \
+  -i 04_quantify/sample1/sample1.BcgI.xls \
+  -m contamination_model.onnx \
+  -o sample1.BcgI.classified.xls
+```
+
+**Parameters**:
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `-i` / `--input` | Yes | Input abundance table from `quantify` step |
+| `-m` / `--model` | Yes | ONNX model file path |
+| `-o` / `--output` | Yes | Output file path |
+
+**Output**:
+- Same TSV format as input with an additional `Prediction` column (integer label from the ONNX model)
+
+---
+
 ### `pipeline`
 
 One-command orchestrator that chains all steps automatically.
@@ -418,7 +459,6 @@ fast2bRAD-M pipeline \
 | `--taxonomy` | — | Taxonomy/classify file (TSV or GTDB format) |
 | `--database` | — | Pre-built database directory (for `sample-only`) |
 | `--pre-digested-dir` | — | Directory with pre-digested `.iibdb` files |
-| `-e` / `--enzyme-file` | — | Pre-built enzyme intermediate file; skips genome digestion |
 | `--site` / `-s` | — | Enzyme name (`BcgI`) or ID (`1`–`16`) |
 | `--level` / `-t` | `species` | Taxonomy level for profiling |
 | `--outdir` | — | Output directory |
@@ -435,7 +475,6 @@ fast2bRAD-M pipeline \
 | `--use-pear` | `no` | Enable PEAR merging for paired-end reads |
 | `--pear-bin` | `pear` | Path to PEAR executable |
 | `--pc` | `1` | Threads per PEAR process |
-| `--keep-enzyme-file` | `no` | Keep intermediate enzyme file after pipeline completes (`yes`/`no`) |
 | `--mock` | — | Comma-separated mock sample names (for merge filtering) |
 | `--control` | — | Comma-separated negative control names (for merge filtering) |
 | `--ko-mapping` | — | Species-to-function mapping matrix; triggers `predict` step after merge |
@@ -509,8 +548,8 @@ results/
 │   └── .done
 │
 ├── 02_db_qual/                    # Step 2: Qualitative database
-│   ├── BcgI.enzyme.iibdb          # All genome tags (removed unless --keep-enzyme-file yes)
-│   ├── BcgI.species.iibdb         # Species-unique tags (zstd-compressed)
+│   ├── BcgI.enzyme.iibdb          # All genome tags
+│   ├── BcgI.species.iibdb         # Species-unique tags
 │   ├── abfh_classify_with_speciename.txt.gz
 │   └── .done
 │
@@ -542,23 +581,21 @@ results/
     ├── run1.filtered.xls          # Filtered (mock/control removed)
     ├── run1.func.xls              # Functional abundance (if --ko-mapping used)
     └── .done
+
+├── classify/                      # ML classification results (optional)
+│   ├── sample1.BcgI.classified.xls   # Per-sample with Prediction column
+│   └── sample2.BcgI.classified.xls
 ```
 
 ---
 
 ## Binary File Format
 
-Fast2bRAD-M uses two binary formats:
+Fast2bRAD-M uses a compact binary format (`.iibsp` / `.iibdb`) for storing hashed 2bRAD tags:
 
-**Legacy format** (`.iibsp` / `.iibdb` for sample tags and enzyme intermediate files):
-- Each record: `[8-byte u64 hash][2-byte u16 id_length][id_bytes...]`
+- Each record: `[8-byte u64 hash][4-byte u32 id_length][id_bytes...]`
 - Tags are stored as canonical (lexicographically smaller of forward/reverse-complement) FxHash values
-- Enzyme intermediate files (`.enzyme.iibdb`) are zstd-compressed; auto-detected on read
-
-**Compact format** (`.iibdb` for level-specific databases, e.g. `BcgI.species.iibdb`):
-- Header: `[4-byte magic "IIBC"][4-byte version][4-byte gcf_count][GCF string table...]`
-- Records: `[8-byte u64 hash][4-byte u32 gcf_index]` — zstd-compressed (v2)
-- ~83% smaller per record vs legacy format (12 bytes vs ~70 bytes)
+- This format enables fast random-access loading and minimal I/O
 
 ---
 

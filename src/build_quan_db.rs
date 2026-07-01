@@ -123,6 +123,11 @@ pub fn run(args: BuildQuanDbArgs) -> Result<()> {
     tracing::info!("Total {} genomes", genome_records.len());
 
     std::fs::create_dir_all(&args.output_dir)?;
+    io_utils::write_classify_file(
+        &args.output_dir,
+        genome_records.iter().map(|g| (g.gcf_id.as_str(), g.taxonomy.as_slice())),
+    )?;
+    tracing::info!("Wrote taxonomy mapping: abfh_classify_with_speciename.txt.gz");
     let remove_redundant = args.remove_redundant.to_lowercase() == "yes";
 
     let intermediate_enzyme_file = digest_genomes_to_intermediate_file(
@@ -164,7 +169,9 @@ fn read_genome_list(list_path: &Path, levels: &[TaxonomyLevel]) -> Result<(Vec<G
         }
         if is_gtdb_format {
             if parts.len() < 2 { continue; }
-            genomes.push(GenomeRecord { gcf_id: extract_gcf_id(parts[0].trim()), taxonomy: parse_gtdb_taxonomy(parts[1])? });
+            let gcf_id = extract_gcf_id(parts[0].trim());
+            let taxonomy = parse_gtdb_taxonomy(parts[1], &gcf_id)?;
+            genomes.push(GenomeRecord { gcf_id, taxonomy });
         } else {
             if parts.len() < 2 { continue; }
             genomes.push(GenomeRecord { gcf_id: parts[0].trim().to_string(), taxonomy: parts[1..].iter().map(|s| s.trim().to_string()).collect() });
@@ -183,14 +190,25 @@ fn extract_gcf_id(filename: &str) -> String {
     name_clean.to_string()
 }
 
-fn parse_gtdb_taxonomy(gtdb_str: &str) -> Result<Vec<String>> {
+fn parse_gtdb_taxonomy(gtdb_str: &str, genome_id: &str) -> Result<Vec<String>> {
     let parts: Vec<&str> = gtdb_str.split(';').collect();
     let mut taxonomy = Vec::new();
     for part in parts.iter() {
         if let Some(pos) = part.find("__") { taxonomy.push(part[pos+2..].to_string()); } else { taxonomy.push(part.to_string()); }
     }
+    // Pad to 8 ranks. When the strain rank (8th) is absent, synthesize it as
+    // "<species> <genome_id>" so each genome forms its own strain. Otherwise every
+    // genome of a species collapses into a single synthetic strain and the strain-level
+    // database becomes a byte-for-byte duplicate of the species-level one.
     while taxonomy.len() < 8 {
-        if let Some(last) = taxonomy.last() { taxonomy.push(format!("{}_strain", last)); } else { taxonomy.push("unknown".to_string()); }
+        if taxonomy.len() == 7 {
+            let species = taxonomy.last().cloned().unwrap_or_else(|| "unknown".to_string());
+            taxonomy.push(format!("{} {}", species, genome_id));
+        } else if let Some(last) = taxonomy.last() {
+            taxonomy.push(format!("{}_strain", last));
+        } else {
+            taxonomy.push("unknown".to_string());
+        }
     }
     Ok(taxonomy)
 }

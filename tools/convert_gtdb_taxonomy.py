@@ -43,10 +43,13 @@ def extract_gcf_id(filename: str) -> str:
     return name_clean
 
 
-def parse_gtdb_taxonomy(gtdb_str: str):
+def parse_gtdb_taxonomy(gtdb_str: str, genome_id: str):
     """
     解析 GTDB taxonomy: d__..;p__..;...;s__..
-    返回 8 级: kingdom..strain (strain=species+'_strain')
+    返回 8 级: kingdom..strain
+    未提供真实株系时, 第 8 级 strain = species + ' ' + genome_id, 使每个基因组成为独立株系。
+    必须与 Rust build_qual_db.rs / build_quan_db.rs 的 parse_gtdb_taxonomy 保持一致,
+    否则 strain 级 quantify 会按本文件的 Strain 列把同物种基因组重新合并。
     """
     parts = [p.strip() for p in gtdb_str.split(';') if p.strip()]
     if len(parts) < 7:
@@ -59,7 +62,7 @@ def parse_gtdb_taxonomy(gtdb_str: str):
 
     vals = [strip_prefix(x) for x in parts[:7]]
     species = vals[6]
-    strain = f"{species}_strain"
+    strain = f"{species} {genome_id}"
     vals.append(strain)
     return vals  # 8 级
 
@@ -84,7 +87,7 @@ def main():
                 continue
             gcf = extract_gcf_id(cols[0])
             try:
-                tax = parse_gtdb_taxonomy(cols[1])
+                tax = parse_gtdb_taxonomy(cols[1], gcf)
             except Exception as e:
                 print(f"[WARN] 跳过行(分类解析失败): {line}\n  原因: {e}", file=sys.stderr)
                 continue
