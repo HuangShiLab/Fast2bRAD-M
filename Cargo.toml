@@ -17,6 +17,7 @@ tracing-appender = "0.2"
 fxhash = "0.2"           # 针对生物信息学短序列哈希优化的快速哈希库
 rayon = "1.8"            # 轻松实现数据并行处理
 ndarray = "0.15"         # 用于机器学习模块的矩阵运算
+regex = "1"              # 用于简并碱基酶（BaeI/HaeIV/Hin4I）识别位点的正则匹配
 
 # 生物信息学特定解析
 needletail = "0.5"       # 极速解析 FASTA/FASTQ 文件

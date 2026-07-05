@@ -515,24 +515,33 @@ Cutibacterium_acnes        2        8        0
 
 ## Supported Enzymes
 
-| ID | Name    | Tag Length |
-|----|---------|-----------|
-| 1  | CspCI   | 36 bp |
-| 2  | AloI    | 37 bp |
-| 3  | BsaXI   | 32 bp |
-| 4  | BaeI    | 36 bp |
-| **5**  | **BcgI** *(recommended)* | **32 bp** |
-| 6  | CjeI    | 37 bp |
-| 7  | PpiI    | 35 bp |
-| 8  | PsrI    | 35 bp |
-| 9  | BplI    | 35 bp |
-| 10 | FalI    | 36 bp |
-| 11 | Bsp24I  | 36 bp |
-| 12 | HaeIV   | 37 bp |
-| 13 | CjePI   | 38 bp |
-| 14 | Hin4I   | 35 bp |
-| 15 | AlfI    | 33 bp |
-| 16 | BslFI   | 33 bp |
+Tag lengths below are derived directly from the `@site` regex patterns in
+the original `2bRADExtraction.pl` (shihuang047/2bRAD-M), so extracted tags
+match the Perl implementation exactly for every enzyme, not just BcgI.
+BaeI, HaeIV, and Hin4I have IUPAC-degenerate positions in their recognition
+sequence (e.g. a pyrimidine-only or purine-only base) that cannot be
+represented as a fixed literal byte string, so they are matched with an
+anchored regex instead of the fixed-byte-offset matcher used for the other
+13 enzymes; matching behavior is otherwise identical.
+
+| ID | Name    | Tag Length | Matching mode |
+|----|---------|-----------|----------------|
+| 1  | CspCI   | 33 bp | fixed-byte |
+| 2  | AloI    | 27 bp | fixed-byte |
+| 3  | BsaXI   | 27 bp | fixed-byte |
+| 4  | BaeI    | 28 bp | regex (degenerate base) |
+| **5**  | **BcgI** *(recommended)* | **32 bp** | fixed-byte |
+| 6  | CjeI    | 28 bp | fixed-byte |
+| 7  | PpiI    | 27 bp | fixed-byte |
+| 8  | PsrI    | 27 bp | fixed-byte |
+| 9  | BplI    | 27 bp | fixed-byte |
+| 10 | FalI    | 27 bp | fixed-byte |
+| 11 | Bsp24I  | 27 bp | fixed-byte |
+| 12 | HaeIV   | 27 bp | regex (degenerate base) |
+| 13 | CjePI   | 27 bp | fixed-byte |
+| 14 | Hin4I   | 27 bp | regex (degenerate base) |
+| 15 | AlfI    | 32 bp | fixed-byte |
+| 16 | BslFI   | 25 bp | fixed-byte |
 
 Enzymes can be specified by name (`--site BcgI`) or numeric ID (`--site 5`).
 

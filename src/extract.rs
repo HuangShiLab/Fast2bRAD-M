@@ -644,35 +644,34 @@ fn process_single_tag_batch(
         if sequence.len() > 50 { sequence.truncate(50); }
         sequence.make_ascii_uppercase();
 
-        for pattern in enzyme.patterns {
-            if sequence.len() < enzyme.tag_length { break; }
-            for offset in 0..sequence.len() {
-                if offset + enzyme.tag_length > sequence.len() { break; }
-                let window = &sequence[offset..offset + enzyme.tag_length];
-                if pattern.matches(window) {
-                    let mut pass = true;
-                    if !qc.check_n(window) { pass = false; }
-                    if pass {
-                        if !record.qual.is_empty() {
-                            if offset + enzyme.tag_length <= record.qual.len() {
-                                let qs = &record.qual[offset..offset + enzyme.tag_length];
-                                if !qs.is_empty() && !qc.check_quality(qs) { pass = false; }
-                            }
-                        }
-                    }
-                    if pass {
-                        let hash = canonical_hash(window);
-                        // Only convert ID string when confirmed to pass
-                        let id_str = String::from_utf8_lossy(&record.id).to_string();
-                        return Some((true, WriteTask { hash, id_str }));
-                    } else {
-                        // Enzyme site matched but QC failed
-                        return Some((false, WriteTask { hash: 0, id_str: String::new() }));
-                    }
+        // Delegate to Enzyme::find_first_tag, which tries each pattern (fwd
+        // then rev) in order and returns the left-most match for the first
+        // pattern that has any hit at all — this mirrors `Single_Lable`'s
+        // per-site, leftmost, match-then-`last` behaviour in
+        // 2bRADExtraction.pl, and works uniformly for both fixed-byte
+        // (`Exact`) and IUPAC-degenerate (`Degenerate`) enzymes.
+        let (offset, len) = enzyme.find_first_tag(&sequence)?;
+        let window = &sequence[offset..offset + len];
+
+        let mut pass = true;
+        if !qc.check_n(window) { pass = false; }
+        if pass {
+            if !record.qual.is_empty() {
+                if offset + len <= record.qual.len() {
+                    let qs = &record.qual[offset..offset + len];
+                    if !qs.is_empty() && !qc.check_quality(qs) { pass = false; }
                 }
             }
         }
-        None
+        if pass {
+            let hash = canonical_hash(window);
+            // Only convert ID string when confirmed to pass
+            let id_str = String::from_utf8_lossy(&record.id).to_string();
+            Some((true, WriteTask { hash, id_str }))
+        } else {
+            // Enzyme site matched but QC failed
+            Some((false, WriteTask { hash: 0, id_str: String::new() }))
+        }
     }).map(|(passed, task)| {
         if passed { (1, 1, Some(task)) } else { (1, 0, None) }
     }).collect::<Vec<_>>().into_iter().fold(Vec::new(), |mut acc, (enz, qc_pass, task_opt)| {
