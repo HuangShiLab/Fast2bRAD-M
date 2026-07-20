@@ -60,6 +60,11 @@ pub struct PipelineArgs {
     #[arg(long = "gscore", default_value = "5.0")]
     pub g_score: f64,
 
+    /// Minimum average read depth per sequenced tag (species-unique marker coverage).
+    /// Taxa below this are excluded (0=no filtering).
+    #[arg(long = "min-tag-depth", visible_alias = "min-coverage", default_value = "0")]
+    pub min_tag_depth: f64,
+
     /// Minimum detected tags per GCF (default 1)
     #[arg(long = "gcf", default_value = "1")]
     pub gcf_threshold: i32,
@@ -327,6 +332,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
             enzyme_site: args.site.clone(),
             output_dir: d_qual.clone(),
             g_score_threshold: 0.0,
+            min_tag_depth: 0.0,
             verbose: "yes".to_string(),
             threads: args.threads.unwrap_or(1),
         };
@@ -442,6 +448,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
                 enzyme_site: args.site.clone(),
                 output_dir: sample_quant_dir.clone(),
                 g_score_threshold: args.g_score,
+                min_tag_depth: args.min_tag_depth,
                 verbose: "yes".to_string(),
                 threads: args.threads.unwrap_or(1),
             };

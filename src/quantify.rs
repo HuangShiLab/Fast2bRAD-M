@@ -40,6 +40,10 @@ pub struct QuantifyArgs {
     /// G-score threshold: taxa with G-score below this are excluded (0=no filtering)
     #[arg(short = 'g', long = "gscore", default_value = "0", help_heading = "Filtering")]
     pub g_score_threshold: f64,
+    /// Minimum average read depth per sequenced tag (i.e. species-unique marker coverage,
+    /// Sequenced_Reads_Num / Sequenced_Tag_Num). Taxa below this are excluded (0=no filtering).
+    #[arg(long = "min-tag-depth", visible_alias = "min-coverage", default_value = "0", help_heading = "Filtering")]
+    pub min_tag_depth: f64,
 
     // ── Options ──
     /// Output per-tag detail files (yes/no)
@@ -95,7 +99,7 @@ pub fn run(args: QuantifyArgs) -> Result<()> {
     };
     let tax_level = validate_taxonomy_level(&args.taxonomy_level)?;
 
-    tracing::info!("COMMAND: quantify -l {} -d {} -t {} -s {} -o {} -g {} -v {} -j {}", args.sample_list.display(), args.database_dir.display(), args.taxonomy_level, args.enzyme_site, args.output_dir.display(), args.g_score_threshold, args.verbose, args.threads);
+    tracing::info!("COMMAND: quantify -l {} -d {} -t {} -s {} -o {} -g {} --min-tag-depth {} -v {} -j {}", args.sample_list.display(), args.database_dir.display(), args.taxonomy_level, args.enzyme_site, args.output_dir.display(), args.g_score_threshold, args.min_tag_depth, args.verbose, args.threads);
 
     std::fs::create_dir_all(&args.output_dir)?;
     let db_file = args.database_dir.join(format!("{}.{}.iibdb", enzyme.name, tax_level));
@@ -113,7 +117,7 @@ pub fn run(args: QuantifyArgs) -> Result<()> {
 
     samples.par_iter().for_each(|(sample_name, sample_data)| {
         tracing::info!(">>> ({}) Sample analysis started", sample_name);
-        let result = process_sample(sample_name, sample_data, &tag_to_gcfs, &gcf_to_taxonomy, &taxon_theory, enzyme, &args.output_dir, args.g_score_threshold, verbose);
+        let result = process_sample(sample_name, sample_data, &tag_to_gcfs, &gcf_to_taxonomy, &taxon_theory, enzyme, &args.output_dir, args.g_score_threshold, args.min_tag_depth, verbose);
         match result {
             Ok(_) => tracing::info!("<<< ({}) Sample analysis completed", sample_name),
             Err(e) => tracing::error!("!!! ({}) Error: {}", sample_name, e),
@@ -240,6 +244,7 @@ fn process_sample(
     enzyme: &crate::enzymes::Enzyme,
     output_dir: &Path,
     g_score_threshold: f64,
+    min_tag_depth: f64,
     verbose: bool,
 ) -> Result<()> {
     // All .clone() calls on Istr (Arc<str>) are O(1) atomic increments — no heap allocation
@@ -302,9 +307,10 @@ fn process_sample(
         stats.sequenced_reads_num = tags.values().sum();
         stats.sequenced_tag_num_gt1 = tags.values().filter(|&&count| count > 1).count();
         let g_score = stats.g_score();
-        if g_score < g_score_threshold { continue; }
+        let tag_depth = stats.reads_per_sequenced();
+        if g_score < g_score_threshold || tag_depth < min_tag_depth { continue; }
 
-        writeln!(writer, "{}\t{:.8}\t{}\t{:.8}%\t{}\t{:.8}\t{:.8}\t{}\t{:.8}", taxonomy.as_ref(), stats.theoretical_tag_num, stats.sequenced_tag_num, stats.percent(), stats.sequenced_reads_num, stats.reads_per_theoretical(), stats.reads_per_sequenced(), stats.sequenced_tag_num_gt1, g_score)?;
+        writeln!(writer, "{}\t{:.8}\t{}\t{:.8}%\t{}\t{:.8}\t{:.8}\t{}\t{:.8}", taxonomy.as_ref(), stats.theoretical_tag_num, stats.sequenced_tag_num, stats.percent(), stats.sequenced_reads_num, stats.reads_per_theoretical(), tag_depth, stats.sequenced_tag_num_gt1, g_score)?;
 
         if verbose {
             let output_name = taxonomy.split('\t').last().unwrap_or("unknown");
