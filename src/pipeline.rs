@@ -64,6 +64,14 @@ pub struct PipelineArgs {
     /// Taxa below this are excluded (0=no filtering).
     #[arg(long = "min-tag-depth", visible_alias = "min-coverage", default_value = "0")]
     pub min_tag_depth: f64,
+    /// Minimum marker recovery percent (Sequenced_Tag_Num / Theoretical_Tag_Num * 100).
+    /// Taxa below this are excluded (0=no filtering).
+    #[arg(long = "min-percent", default_value = "0")]
+    pub min_percent: f64,
+    /// Minimum relative abundance percent (taxon reads / total sample reads * 100).
+    /// Taxa below this are excluded (0=no filtering).
+    #[arg(long = "min-relative-abundance", default_value = "0")]
+    pub min_relative_abundance: f64,
 
     /// Minimum detected tags per GCF (default 1)
     #[arg(long = "gcf", default_value = "1")]
@@ -333,6 +341,8 @@ pub fn run(args: PipelineArgs) -> Result<()> {
             output_dir: d_qual.clone(),
             g_score_threshold: 0.0,
             min_tag_depth: 0.0,
+            min_percent: 0.0,
+            min_relative_abundance: 0.0,
             verbose: "yes".to_string(),
             threads: args.threads.unwrap_or(1),
         };
@@ -449,6 +459,8 @@ pub fn run(args: PipelineArgs) -> Result<()> {
                 output_dir: sample_quant_dir.clone(),
                 g_score_threshold: args.g_score,
                 min_tag_depth: args.min_tag_depth,
+                min_percent: args.min_percent,
+                min_relative_abundance: args.min_relative_abundance,
                 verbose: "yes".to_string(),
                 threads: args.threads.unwrap_or(1),
             };
