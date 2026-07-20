@@ -241,15 +241,33 @@ Calculate per-taxon relative abundance for one or more samples.
 
 ```bash
 fast2bRAD-M quantify \
-  -l sample_list.tsv \   # sample_name<TAB>path_to.iibsp
-  -d database_dir/ \     # directory with BcgI.species.iibdb + classify file
+  -l sample_list.tsv \          # sample_name<TAB>path_to.iibsp
+  -d database_dir/ \            # directory with BcgI.species.iibdb + classify file
   -t species \
   -s BcgI \
   -o quantify_out/ \
-  -g 5.0 \               # G-score threshold (species with G < threshold excluded)
-  -v yes \               # verbose: output per-tag detail files
+  -g 5.0 \                      # G-score threshold (species with G < threshold excluded)
+  --min-tag-depth 2 \           # min average reads per sequenced tag
+  --min-relative-abundance 0.003 \  # min taxon reads / total sample reads (%)
+  -v yes \                      # verbose: output per-tag detail files
   -j 8
 ```
+
+**Recommended filtering defaults**
+
+Based on mock-community benchmarking (MSA1002/1003/1005/1007, 164-genome database, BcgI), the following defaults balance precision and recall:
+
+```bash
+-g 5 --min-tag-depth 2 --min-relative-abundance 0.003
+```
+
+| Filter | Field | Recommended default | When to tighten/loosen |
+|--------|-------|---------------------|------------------------|
+| `-g` / `--gscore` | G-score | `5` | Lower (e.g. `3`) for very low-biomass samples; raise to reduce noise |
+| `--min-tag-depth` | `Sequenced_Reads_Num / Sequenced_Tag_Num` | `2` | Most effective single filter; lower to `1` if losing rare true positives |
+| `--min-relative-abundance` | taxon reads / total reads × 100 | `0.003` | Use `0.005`–`0.01` for high-biomass/high-host-contamination samples; lower/omit for ultra-low biomass |
+| `--min-percent` | `Sequenced_Tag_Num / Theoretical_Tag_Num` × 100 | `0` (off) | Provided for MAP2B-style feature parity; showed little extra benefit in our mocks |
+| `--min-coverage` | alias for `--min-tag-depth` | — | Same as `--min-tag-depth` |
 
 **G-score** = `sqrt(sequenced_tag_num × sequenced_reads_num)` — a combined measure of breadth and depth of coverage.
 
@@ -402,6 +420,8 @@ fast2bRAD-M pipeline \
   --prefix run1 \
   --threads 16 \
   --gscore 5 \
+  --min-tag-depth 2 \
+  --min-relative-abundance 0.003 \
   --gcf 1 \
   --resume yes
 ```
@@ -465,6 +485,10 @@ fast2bRAD-M pipeline \
 | `--prefix` | `Abundance_Stat` | Prefix for output files |
 | `--threads` / `-j` | auto | Global thread count |
 | `--gscore` | `5.0` | G-score threshold for find-genome |
+| `--min-tag-depth` | `0` | Min average reads per sequenced tag (species-unique marker coverage). Default `0` disables; recommended `2` |
+| `--min-coverage` | `0` | Alias for `--min-tag-depth` |
+| `--min-percent` | `0` | Min marker recovery percent (`Sequenced_Tag_Num / Theoretical_Tag_Num × 100`) |
+| `--min-relative-abundance` | `0` | Min taxon reads / total sample reads × 100. Default `0` disables; recommended `0.003` |
 | `--gcf` | `1` | Min detected tags per GCF in find-genome |
 | `--resume` | `no` | Skip steps that already have `.done` markers (`yes`/`no`) |
 | `--qc` | `yes` | Quality control for extract |
