@@ -43,6 +43,80 @@ where
     Ok(())
 }
 
+// ================== Taxonomy rank prefixes ==================
+
+/// Rank prefixes for taxonomy levels 1–7 (kingdom → species). Level 8 (strain)
+/// is intentionally left unprefixed (it is typically the accession, or
+/// "<species> <accession>").
+pub const RANK_PREFIXES: [&str; 7] = ["k__", "p__", "c__", "o__", "f__", "g__", "s__"];
+
+/// Strip a leading rank prefix such as `d__` / `s__` (a short letter code
+/// followed by `__`). Anything else is returned unchanged.
+fn strip_rank_prefix(s: &str) -> &str {
+    match s.find("__") {
+        Some(pos) if pos <= 2 => &s[pos + 2..],
+        _ => s,
+    }
+}
+
+/// Normalize a genome's taxonomy to the 2bRAD-M convention: ensure levels 1–7
+/// carry `k__/p__/c__/o__/f__/g__/s__` (replacing any existing prefix, e.g.
+/// GTDB's `d__`), leaving level 8 (strain) as-is. In place; tolerant of fewer
+/// than 8 levels. Bare names get prefixes added; already-prefixed names are
+/// normalized to this scheme.
+pub fn apply_rank_prefixes(taxonomy: &mut [String]) {
+    for (i, prefix) in RANK_PREFIXES.iter().enumerate() {
+        if let Some(level) = taxonomy.get_mut(i) {
+            let bare = strip_rank_prefix(level).to_string();
+            *level = format!("{}{}", prefix, bare);
+        }
+    }
+}
+
+/// Build the normalized 8-rank taxonomy from raw rank strings. `raw_levels` may
+/// come from a single semicolon-delimited GTDB column (`d__X;p__Y;..` split on
+/// `;`) or from one rank per TSV column; each entry may be bare or already
+/// prefixed. Ranks 1–7 are normalized to `k__/p__/.../s__`; rank 8 (strain) is
+/// synthesized as "<species> <genome_id>" when only 7 ranks are supplied, so
+/// each genome forms its own strain (otherwise every genome of a species would
+/// collapse into one strain and the strain-level database would duplicate the
+/// species one).
+pub fn normalize_taxonomy(raw_levels: &[&str], genome_id: &str) -> Vec<String> {
+    let mut tax: Vec<String> = raw_levels
+        .iter()
+        .map(|s| strip_rank_prefix(s.trim()).to_string())
+        .collect();
+    while tax.len() < 8 {
+        if tax.len() == 7 {
+            let species = tax.last().cloned().unwrap_or_else(|| "unknown".to_string());
+            // Join species and genome id with '_' (and de-space the species name)
+            // so the synthesized strain has no whitespace.
+            tax.push(format!("{} {}", species, genome_id).replace(' ', "_"));
+        } else if let Some(last) = tax.last().cloned() {
+            tax.push(format!("{}_strain", last));
+        } else {
+            tax.push("unknown".to_string());
+        }
+    }
+    tax.truncate(8);
+    apply_rank_prefixes(&mut tax);
+    tax
+}
+
+/// Heuristic: does this trailing column look like a genome file path rather than
+/// a taxonomy rank? Lets the parser peel an optional path column off a
+/// tab-separated taxonomy line.
+pub fn looks_like_path(s: &str) -> bool {
+    let s = s.trim();
+    s.contains('/')
+        || s.ends_with(".gz")
+        || s.ends_with(".fa")
+        || s.ends_with(".fna")
+        || s.ends_with(".fasta")
+        || s.ends_with(".ffn")
+        || s.ends_with(".frn")
+}
+
 pub fn write_sample_stats(path: &Path, stats: &DigestStats) -> Result<()> {
     let mut file =
         File::create(path).with_context(|| format!("Failed to write sample statistics: {}", path.display()))?;

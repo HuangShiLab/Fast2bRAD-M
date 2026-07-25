@@ -6,7 +6,7 @@
 
 | 2bRAD-M 脚本 | fast2bRAD-M 命令 | 状态 | 说明 |
 |-------------|-----------------|------|------|
-| `2bRADExtraction.pl` | `extract` | ✅ 完成 | 支持 Type 1-4 全部输入类型，输出与 Perl 版本一致 |
+| `2bRADExtraction.pl` | `extract` | ⚠️ 部分 | 支持 Type 1-3（参考基因组/shotgun/单标签）；Type 4（五重拼接标签拆分）未实现。16 种酶的识别位点长度与匹配规则已逐一核对并修正，标签序列与 Perl 版本一致（含 BaeI/HaeIV/Hin4I 三个简并碱基酶，现采用正则匹配） |
 | `CreateQualDatabase_2bRAD.pl` | `build-qual-db` | ✅ 完成 | 构建定性数据库，输出所有标签+unique标记 |
 | `CreateQuanDatabase_2bRAD.pl` | `build-quan-db` | ✅ 完成 | 构建定量数据库，只输出unique标签 |
 | `CalculateRelativeAbundance_Single2bEnzyme.pl` | `quantify` | ✅ 完成 | 单酶丰度计算，可用于定性和定量分析 |
@@ -30,7 +30,7 @@
 
 ## 详细功能分析
 
-### 1. 数字酶切 (extract) ✅
+### 1. 数字酶切 (extract) ⚠️
 
 **2bRAD-M**: `scripts/2bRADExtraction.pl`
 - 支持 Type 1-4 全部输入类型
@@ -38,9 +38,11 @@
 - 支持质量控制
 
 **fast2bRAD-M**: `extract` 子命令
-- ✅ 完全实现
+- ✅ 支持 Type 1（参考基因组）/ Type 2（shotgun）/ Type 3（单标签）
+- ❌ 不支持 Type 4（五重拼接标签拆分，对应 Perl 的 `Five_Lable`）
 - ✅ 支持批量并行处理
-- ✅ 输出格式与 Perl 版本一致
+- ✅ 16 种酶的 tag 长度与识别位点锚点已对照 `2bRADExtraction.pl` 的 `@site` 正则逐一修正，输出的 tag 序列与 Perl 版本一致
+- ✅ BaeI / HaeIV / Hin4I 三个含 IUPAC 简并碱基（如嘧啶/嘌呤限定位点）的酶，原先用定长字节锚点近似会丢失简并位点约束，现改为正则匹配，与 Perl 的 `[CT]`/`[AG]`/`[GAC]` 字符类语义一致；其余 13 种酶仍使用固定字节串精确匹配（性能更优）
 
 ### 2. 构建定性数据库 (build-qual-db) ✅
 

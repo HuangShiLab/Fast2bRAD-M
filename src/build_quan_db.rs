@@ -155,27 +155,32 @@ fn read_genome_list(list_path: &Path, levels: &[TaxonomyLevel]) -> Result<(Vec<G
     let reader = BufReader::new(file);
     let mut genomes = Vec::new();
     let mut taxonomy_levels_map = FxHashMap::default();
-    let mut is_gtdb_format = false;
-    let mut first_data_line = true;
     for level in levels { taxonomy_levels_map.insert(level.as_str().to_string(), *level as usize); }
     for line in reader.lines() {
         let line = line?;
         let trimmed_line = line.trim();
         if trimmed_line.is_empty() || trimmed_line.starts_with('#') { continue; }
         let parts: Vec<&str> = trimmed_line.split('\t').collect();
-        if first_data_line {
-            first_data_line = false;
-            if parts.len() >= 2 && (parts[1].contains("d__") || parts[1] == "gtdb_taxonomy") { is_gtdb_format = true; if parts[0] == "accession" || parts[0] == "GCF_ID" { continue; } }
-        }
-        if is_gtdb_format {
-            if parts.len() < 2 { continue; }
-            let gcf_id = extract_gcf_id(parts[0].trim());
-            let taxonomy = parse_gtdb_taxonomy(parts[1], &gcf_id)?;
-            genomes.push(GenomeRecord { gcf_id, taxonomy });
+        // Skip a header row.
+        if parts[0] == "accession" || parts[0] == "GCF_ID" { continue; }
+        let gcf_id = extract_gcf_id(parts[0].trim());
+
+        // Taxonomy is either a single semicolon-delimited GTDB column
+        // (`d__..;p__..;s__..`) or one rank per column (bare or already prefixed);
+        // a trailing path column, if any, is ignored here (build_quan_db only
+        // works from pre-digested inputs).
+        let raw_levels: Vec<&str> = if parts.len() >= 2 && parts[1].contains(';') {
+            parts[1].split(';').collect()
         } else {
-            if parts.len() < 2 { continue; }
-            genomes.push(GenomeRecord { gcf_id: parts[0].trim().to_string(), taxonomy: parts[1..].iter().map(|s| s.trim().to_string()).collect() });
-        }
+            let mut cols: Vec<&str> = parts[1..].to_vec();
+            if cols.last().map_or(false, |s| io_utils::looks_like_path(s)) {
+                cols.pop();
+            }
+            cols
+        };
+        if raw_levels.is_empty() { continue; }
+        let taxonomy = io_utils::normalize_taxonomy(&raw_levels, &gcf_id);
+        genomes.push(GenomeRecord { gcf_id, taxonomy });
     }
     Ok((genomes, taxonomy_levels_map))
 }
@@ -188,29 +193,6 @@ fn extract_gcf_id(filename: &str) -> String {
         if parts.len() >= 2 { return format!("{}_{}", parts[0], parts[1]); }
     }
     name_clean.to_string()
-}
-
-fn parse_gtdb_taxonomy(gtdb_str: &str, genome_id: &str) -> Result<Vec<String>> {
-    let parts: Vec<&str> = gtdb_str.split(';').collect();
-    let mut taxonomy = Vec::new();
-    for part in parts.iter() {
-        if let Some(pos) = part.find("__") { taxonomy.push(part[pos+2..].to_string()); } else { taxonomy.push(part.to_string()); }
-    }
-    // Pad to 8 ranks. When the strain rank (8th) is absent, synthesize it as
-    // "<species> <genome_id>" so each genome forms its own strain. Otherwise every
-    // genome of a species collapses into a single synthetic strain and the strain-level
-    // database becomes a byte-for-byte duplicate of the species-level one.
-    while taxonomy.len() < 8 {
-        if taxonomy.len() == 7 {
-            let species = taxonomy.last().cloned().unwrap_or_else(|| "unknown".to_string());
-            taxonomy.push(format!("{} {}", species, genome_id));
-        } else if let Some(last) = taxonomy.last() {
-            taxonomy.push(format!("{}_strain", last));
-        } else {
-            taxonomy.push("unknown".to_string());
-        }
-    }
-    Ok(taxonomy)
 }
 
 /// Returns (path, was_generated). `was_generated` is false when using an existing file via `-e`.

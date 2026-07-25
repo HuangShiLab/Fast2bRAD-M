@@ -188,31 +188,34 @@ fn read_genome_list(path: &Path) -> Result<Vec<GenomeRecord>> {
     let file = File::open(path)?;
     let reader = std::io::BufReader::new(file);
     let mut genomes = Vec::new();
-    let mut is_gtdb_format = false;
-    let mut first_data_line = true;
     for line in std::io::BufRead::lines(reader) {
         let line = line?;
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
         let parts: Vec<&str> = trimmed.split('\t').collect();
-        if first_data_line {
-            first_data_line = false;
-            if parts.len() >= 2 && (parts[1].contains("d__") || parts[1] == "gtdb_taxonomy") {
-                is_gtdb_format = true;
-                if parts[0] == "accession" || parts[0] == "GCF_ID" { continue; }
-            }
-        }
-        if is_gtdb_format {
-            if parts.len() < 2 { continue; }
-            let genome_path = if parts.len() > 2 { Some(PathBuf::from(parts[2])) } else { None };
-            let gcf_id = extract_gcf_id(parts[0]);
-            let taxonomy = parse_gtdb_taxonomy(parts[1], &gcf_id)?;
-            genomes.push(GenomeRecord { gcf_id, taxonomy, genome_path });
-        } else {
-            if parts.len() < 9 { continue; }
-            let genome_path = if parts.len() > 9 { Some(PathBuf::from(parts[9])) } else { None };
-            genomes.push(GenomeRecord { gcf_id: parts[0].to_string(), taxonomy: parts[1..9].iter().map(|s| s.to_string()).collect(), genome_path });
-        }
+        // Skip a header row.
+        if parts[0] == "accession" || parts[0] == "GCF_ID" { continue; }
+        let gcf_id = extract_gcf_id(parts[0].trim());
+
+        // Taxonomy is either a single semicolon-delimited GTDB column
+        // (`d__..;p__..;s__..`) or one rank per column (bare or already
+        // prefixed). An optional trailing column may hold the genome path.
+        let (raw_levels, genome_path): (Vec<&str>, Option<PathBuf>) =
+            if parts.len() >= 2 && parts[1].contains(';') {
+                let path = if parts.len() > 2 { Some(PathBuf::from(parts[2])) } else { None };
+                (parts[1].split(';').collect(), path)
+            } else {
+                let mut cols: Vec<&str> = parts[1..].to_vec();
+                let path = if cols.last().map_or(false, |s| io_utils::looks_like_path(s)) {
+                    cols.pop().map(PathBuf::from)
+                } else {
+                    None
+                };
+                (cols, path)
+            };
+        if raw_levels.is_empty() { continue; }
+        let taxonomy = io_utils::normalize_taxonomy(&raw_levels, &gcf_id);
+        genomes.push(GenomeRecord { gcf_id, taxonomy, genome_path });
     }
     Ok(genomes)
 }
@@ -225,29 +228,6 @@ fn extract_gcf_id(filename: &str) -> String {
         if parts.len() >= 2 { return format!("{}_{}", parts[0], parts[1]); }
     }
     name_clean.to_string()
-}
-
-fn parse_gtdb_taxonomy(gtdb_str: &str, genome_id: &str) -> Result<Vec<String>> {
-    let parts: Vec<&str> = gtdb_str.split(';').collect();
-    let mut taxonomy = Vec::new();
-    for part in parts.iter() {
-        if let Some(pos) = part.find("__") { taxonomy.push(part[pos+2..].to_string()); } else { taxonomy.push(part.to_string()); }
-    }
-    // Pad to 8 ranks. When the strain rank (8th) is absent, synthesize it as
-    // "<species> <genome_id>" so each genome forms its own strain. Otherwise every
-    // genome of a species collapses into a single synthetic strain and the strain-level
-    // database becomes a byte-for-byte duplicate of the species-level one.
-    while taxonomy.len() < 8 {
-        if taxonomy.len() == 7 {
-            let species = taxonomy.last().cloned().unwrap_or_else(|| "unknown".to_string());
-            taxonomy.push(format!("{} {}", species, genome_id));
-        } else if let Some(last) = taxonomy.last() {
-            taxonomy.push(format!("{}_strain", last));
-        } else {
-            taxonomy.push("unknown".to_string());
-        }
-    }
-    Ok(taxonomy)
 }
 
 fn merge_pre_digested_files(genomes: &[GenomeRecord], enzyme: &'static Enzyme, pre_digested_dir: &Path, output_file: &Path) -> Result<()> {
