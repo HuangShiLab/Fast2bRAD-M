@@ -470,7 +470,9 @@ pub const BSLFI: Enzyme = Enzyme {
 
 // ========== Enzyme lookup functions ==========
 
-static ENZYMES: &[&Enzyme] = &[
+/// Every enzyme known to this build. Also used by tests that must hold for all
+/// of them (e.g. that no tag is longer than `extract::MAX_TAG_LENGTH`).
+pub static ENZYMES: &[&Enzyme] = &[
     &CSPCI, &ALOI, &BSAXI, &BAEI, &BCGI, &CJEI, &PPII, &PSRI, &BPLI, &FALI, &BSP24I, &HAEIV,
     &CJEPI, &HIN4I, &ALFI, &BSLFI,
 ];

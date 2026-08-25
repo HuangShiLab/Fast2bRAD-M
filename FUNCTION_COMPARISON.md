@@ -228,7 +228,7 @@ fast2bRAD-M pipeline \
   --outdir results/ --prefix run1 --threads 16
 
 # 方式2：分步执行（更灵活）
-fast2bRAD-M extract --batch samples.tsv -t 2 -s BcgI --od 01_extract
+fast2bRAD-M extract -l samples.tsv -t 2 -s BcgI --od 01_extract
 fast2bRAD-M build-qual-db -l genome_list.tsv -s BcgI -t species -o 02_db_qual
 fast2bRAD-M quantify -l samples.tsv -d 02_db_qual -t species -s BcgI -o qualitative
 fast2bRAD-M find-genome -l samples.tsv -d 02_db_qual -o sdb --qual-dir qualitative

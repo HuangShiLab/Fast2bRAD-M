@@ -1,21 +1,3 @@
-#[derive(Debug, Clone)]
-pub struct DigestStats {
-    pub sample_id: String,
-    pub enzyme: String,
-    pub input_sequences: usize,
-    pub tag_count: usize,
-}
-
-impl DigestStats {
-    pub fn percent(&self) -> f64 {
-        if self.input_sequences == 0 {
-            0.0
-        } else {
-            (self.tag_count as f64 / self.input_sequences as f64) * 100.0
-        }
-    }
-}
-
 /// Input data type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputType {
@@ -66,13 +48,19 @@ impl Default for QualityControl {
 }
 
 impl QualityControl {
-    /// Check whether the N ratio in a sequence satisfies the threshold
+    /// Check whether the N ratio in a sequence satisfies the threshold.
+    /// Accepts both cases: sequences reach here straight from the reader in
+    /// some paths, and a lower-case `n` is just as unusable as an upper-case
+    /// one. An empty slice has no N and passes.
     pub fn check_n(&self, sequence: &[u8]) -> bool {
         if !self.enabled {
             return true;
         }
+        if sequence.is_empty() {
+            return true;
+        }
 
-        let n_count = sequence.iter().filter(|&&b| b == b'N').count();
+        let n_count = sequence.iter().filter(|&&b| b == b'N' || b == b'n').count();
 
         if self.max_n > 0.0 && self.max_n < 1.0 {
             // Fraction mode
@@ -84,13 +72,18 @@ impl QualityControl {
         }
     }
 
-    /// Check whether the quality scores satisfy the threshold
+    /// Check whether the quality scores satisfy the threshold. An empty slice
+    /// has no failing base and passes (guarding the division below, which the
+    /// callers used to have to protect against themselves).
     pub fn check_quality(&self, quality: &[u8]) -> bool {
         if !self.enabled {
             return true;
         }
+        if quality.is_empty() {
+            return true;
+        }
 
-        let min_phred = self.min_quality + self.quality_base;
+        let min_phred = self.min_quality.saturating_add(self.quality_base);
         let passed_count = quality.iter().filter(|&&q| q >= min_phred).count();
         let passed_percent = (passed_count * 100) / quality.len();
 

@@ -149,10 +149,17 @@ fast2bRAD-M extract \
   --op sample_prefix \
   -j 8 \                           # threads
   --qc yes \                       # quality control
+  --qc-scope auto \                # QC on the whole read or on the tag window
   -n 0.08 \                        # max N ratio
   -q 30 \                          # min quality score
   -p 80                            # min quality percent
 ```
+
+`--qc-scope` decides which bases the `-n/-q/-p` filters look at: `read` drops a
+read whose low-quality or N bases lie anywhere in it, `tag` judges only the tag
+window so distant bad bases in a long shotgun read no longer discard an
+otherwise clean tag. `auto` (the default) keeps each input type's historical
+behaviour — `read` for `-t 2`, `tag` for `-t 3`.
 
 **Input types**:
 
@@ -165,7 +172,19 @@ fast2bRAD-M extract \
 **Output**:
 - `{prefix}.{enzyme}.iibsp` — Binary tag file for sample reads (Types 2 & 3)
 - `{prefix}.{enzyme}.iibdb` — Binary tag file for reference genomes (Type 1)
-- `{prefix}.{enzyme}.stat.tsv` — Digest statistics
+- `{prefix}.{enzyme}.stat.tsv` — Digest statistics. For `-t 1` the columns are
+  `sample/enzyme/contigs/total_bases/tag_count/tags_per_mb`; for `-t 2`/`-t 3`
+  they are read-based counts
+
+**Paired-end input** (two files given to `-i`, or a third column in the `-l`
+list): both mates are always processed. Without PEAR they are read in lockstep
+and a tag seen on both mates of a pair is counted once, since overlapping mates
+describe the same physical fragment.
+
+**Batch mode failures**: a sample that fails to process has its partial output
+removed and the command exits non-zero, listing the failed samples — an empty
+or truncated database is never left behind for downstream steps to misread as a
+tag-free sample.
 
 **Paired-end with PEAR merging** (optional, Type 2 only):
 ```bash
@@ -602,9 +621,20 @@ results/
 
 Fast2bRAD-M uses a compact binary format (`.iibsp` / `.iibdb`) for storing hashed 2bRAD tags:
 
-- Each record: `[8-byte u64 hash][4-byte u32 id_length][id_bytes...]`
-- Tags are stored as canonical (lexicographically smaller of forward/reverse-complement) FxHash values
-- This format enables fast random-access loading and minimal I/O
+Two record streams share the same tooling (`inspect` auto-detects both):
+
+- **Reference genome / database streams** (`.iibdb`): one record per tag,
+  `[8-byte u64 hash][2-byte u16 id_length][id_bytes...]`. The id carries the
+  contig (or `contig|offset` with `--record-pos`, or `gcf|idx|scaffold|pos|..`
+  in a built database).
+- **Sample tag streams** (`.iibsp`): an 8-byte header (`IIBS` + `u32` version)
+  followed by bare `[8-byte u64 hash]` records. Read names are not stored —
+  nothing downstream consumes them, and dropping them removes ~15 bytes per tag
+  (hundreds of MB on a deeply sequenced sample). Older `.iibsp` files that do
+  carry ids are still read correctly.
+
+Tags are stored as canonical (lexicographically smaller of forward/reverse-complement)
+FxHash values, which makes the format compact and fast to stream.
 
 ---
 

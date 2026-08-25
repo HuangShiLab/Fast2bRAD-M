@@ -7,7 +7,6 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 
-use crate::types::DigestStats;
 
 // [Optimization] Increase I/O buffer size (default 8 KB -> 128 KB)
 // Reduces the number of system calls and significantly improves throughput for large file I/O
@@ -117,23 +116,74 @@ pub fn looks_like_path(s: &str) -> bool {
         || s.ends_with(".frn")
 }
 
-pub fn write_sample_stats(path: &Path, stats: &DigestStats) -> Result<()> {
+/// Per-genome digest statistics (`-t 1`). Deliberately does *not* carry a
+/// "percent": tags/contigs is meaningless (it routinely exceeds 100%, e.g.
+/// "5000.00%"), so tag density per Mb is reported instead.
+pub fn write_genome_stats(
+    path: &Path,
+    sample_id: &str,
+    enzyme: &str,
+    contigs: usize,
+    total_bases: usize,
+    tag_count: usize,
+) -> Result<()> {
     let mut file =
         File::create(path).with_context(|| format!("Failed to write sample statistics: {}", path.display()))?;
-    writeln!(file, "sample\tenzyme\tinput_sequences\ttag_count\tpercent")?;
+    writeln!(file, "sample\tenzyme\tcontigs\ttotal_bases\ttag_count\ttags_per_mb")?;
+    let tags_per_mb = if total_bases == 0 {
+        0.0
+    } else {
+        tag_count as f64 * 1_000_000.0 / total_bases as f64
+    };
+    writeln!(
+        file,
+        "{}\t{}\t{}\t{}\t{}\t{:.2}",
+        sample_id, enzyme, contigs, total_bases, tag_count, tags_per_mb
+    )?;
+    Ok(())
+}
+
+/// Per-sample read statistics (`-t 2`). `percent` is tags per 100 input reads.
+pub fn write_read_stats(
+    path: &Path,
+    sample_id: &str,
+    enzyme: &str,
+    input_reads: usize,
+    tag_count: usize,
+) -> Result<()> {
+    let mut file =
+        File::create(path).with_context(|| format!("Failed to write sample statistics: {}", path.display()))?;
+    writeln!(file, "sample\tenzyme\tinput_reads_num\ttag_count\tpercent")?;
+    let percent = if input_reads == 0 {
+        0.0
+    } else {
+        tag_count as f64 / input_reads as f64 * 100.0
+    };
     writeln!(
         file,
         "{}\t{}\t{}\t{}\t{:.2}%",
-        stats.sample_id,
-        stats.enzyme,
-        stats.input_sequences,
-        stats.tag_count,
-        stats.percent()
+        sample_id, enzyme, input_reads, tag_count, percent
     )?;
     Ok(())
 }
 
 // ================== Binary format read/write utilities ==================
+//
+// Two record streams share this module:
+//
+//  * **id-carrying stream** (reference genome `*.iibdb`, per-genome digests):
+//    `[8] hash | [2] id_len | [id_len] id`. The id is what makes a genome
+//    database useful (contig / `gcf|idx|scaffold|pos`), so it is kept.
+//
+//  * **id-less stream** (sample tags, `*.iibsp`): an 8-byte header
+//    (`IIBS` + version) followed by bare `[8] hash` records. Nothing
+//    downstream of `extract` ever reads a sample record's id — `quantify`
+//    counts hashes — so storing per-read names only burned disk and I/O
+//    (~15 bytes/tag, i.e. hundreds of MB on a 10^7-tag sample) and invited
+//    duplicate-id confusion between R1/R2. See `write_sample_tag_header`.
+//
+// `BinaryRecordReader` auto-detects which of the two it is looking at, so
+// sample files written by older versions (with ids) still read back fine.
 
 pub fn write_binary_record<W: Write>(writer: &mut W, hash: u64, id: &str) -> io::Result<()> {
     writer.write_all(&hash.to_le_bytes())?;
@@ -144,44 +194,138 @@ pub fn write_binary_record<W: Write>(writer: &mut W, hash: u64, id: &str) -> io:
     Ok(())
 }
 
+/// Magic marking an id-less sample tag stream. Chosen so it cannot be mistaken
+/// for a legacy first record: a legacy stream starts with a tag hash, and the
+/// chance of a hash matching these exact 8 bytes is 2^-64.
+pub const SAMPLE_TAG_MAGIC: &[u8; 4] = b"IIBS";
+pub const SAMPLE_TAG_VERSION: u32 = 1;
+
+/// Write the id-less sample tag stream header. Must be called once, before any
+/// `write_sample_tag`.
+pub fn write_sample_tag_header<W: Write>(writer: &mut W) -> io::Result<()> {
+    writer.write_all(SAMPLE_TAG_MAGIC)?;
+    writer.write_all(&SAMPLE_TAG_VERSION.to_le_bytes())
+}
+
+/// Write one bare tag hash into an id-less sample tag stream.
+#[inline]
+pub fn write_sample_tag<W: Write>(writer: &mut W, hash: u64) -> io::Result<()> {
+    writer.write_all(&hash.to_le_bytes())
+}
+
+/// Fill `buf`, returning how many bytes were actually read. Returns `buf.len()`
+/// on success and `0` at a clean end of stream; anything in between means the
+/// stream was truncated mid-record. Unlike `read_exact` this tolerates the
+/// short reads that decompressors (gzip/zstd) legitimately return.
+fn read_full<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
+}
+
 pub struct BinaryRecordReader<R> {
     reader: R,
+    /// True for the `IIBS` sample stream: records are bare hashes, no ids.
+    id_less: bool,
+    /// First 8 bytes of a legacy stream, consumed while sniffing the header.
+    pending_hash: Option<[u8; 8]>,
+    at_eof: bool,
+    /// Scratch for the id bytes of an id-carrying record.
+    id_bytes: Vec<u8>,
 }
 
 impl<R: Read> BinaryRecordReader<R> {
-    pub fn new(reader: R) -> Self {
-        Self { reader }
+    /// Sniff the 8-byte header to decide whether this is an id-less sample
+    /// stream or a legacy id-carrying one.
+    pub fn new(mut reader: R) -> Result<Self> {
+        let mut head = [0u8; 8];
+        let n = read_full(&mut reader, &mut head).context("Failed to read record stream header")?;
+        match n {
+            0 => Ok(Self {
+                reader,
+                id_less: false,
+                pending_hash: None,
+                at_eof: true,
+                id_bytes: Vec::new(),
+            }),
+            8 if &head[..4] == SAMPLE_TAG_MAGIC => {
+                let version = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
+                if version != SAMPLE_TAG_VERSION {
+                    anyhow::bail!("Unsupported sample tag stream version: {}", version);
+                }
+                Ok(Self {
+                    reader,
+                    id_less: true,
+                    pending_hash: None,
+                    at_eof: false,
+                    id_bytes: Vec::new(),
+                })
+            }
+            8 => Ok(Self {
+                reader,
+                id_less: false,
+                pending_hash: Some(head),
+                at_eof: false,
+                id_bytes: Vec::with_capacity(128),
+            }),
+            n => anyhow::bail!("Truncated record stream: only {} of 8 header bytes present", n),
+        }
+    }
+
+    /// Whether records in this stream carry no id (sample tag stream).
+    pub fn is_id_less(&self) -> bool {
+        self.id_less
     }
 
     /// [Optimization] Read the next record, reusing the provided String buffer
-    /// This avoids millions of String allocations
+    /// This avoids millions of String allocations. For an id-less stream the
+    /// buffer is simply left empty.
     pub fn next_record_reuse(&mut self, buffer: &mut String) -> Result<Option<u64>> {
-        let mut hash_buf = [0u8; 8];
-        if let Err(e) = self.reader.read_exact(&mut hash_buf) {
-            if e.kind() == io::ErrorKind::UnexpectedEof {
-                return Ok(None);
-            }
-            return Err(e.into());
-        }
-        let hash = u64::from_le_bytes(hash_buf);
-
-        let mut len_buf = [0u8; 2];
-        self.reader.read_exact(&mut len_buf).context("Failed to read ID length")?;
-        let len = u16::from_le_bytes(len_buf) as usize;
-
-        // Reuse the buffer: clear content but retain capacity
         buffer.clear();
 
-        // Use unsafe to write directly into the vec for maximum performance
-        // Safe as long as the data source is valid UTF-8 (FASTQ IDs are typically ASCII)
-        unsafe {
-            let v = buffer.as_mut_vec();
-            if v.capacity() < len {
-                v.reserve(len - v.len());
+        let hash = match self.pending_hash.take() {
+            Some(bytes) => u64::from_le_bytes(bytes),
+            None => {
+                if self.at_eof {
+                    return Ok(None);
+                }
+                let mut hash_buf = [0u8; 8];
+                match read_full(&mut self.reader, &mut hash_buf).context("Failed to read tag hash")? {
+                    0 => {
+                        self.at_eof = true;
+                        return Ok(None);
+                    }
+                    8 => u64::from_le_bytes(hash_buf),
+                    n => anyhow::bail!("Truncated record: {} trailing byte(s) after the last complete record", n),
+                }
             }
-            v.set_len(len);
-            self.reader.read_exact(v).context("Failed to read ID content")?;
+        };
+
+        if self.id_less {
+            return Ok(Some(hash));
         }
+
+        let mut len_buf = [0u8; 2];
+        if read_full(&mut self.reader, &mut len_buf).context("Failed to read ID length")? != 2 {
+            anyhow::bail!("Truncated record: tag hash is not followed by an ID length");
+        }
+        let len = u16::from_le_bytes(len_buf) as usize;
+
+        self.id_bytes.clear();
+        self.id_bytes.resize(len, 0);
+        if read_full(&mut self.reader, &mut self.id_bytes).context("Failed to read ID content")? != len {
+            anyhow::bail!("Truncated record: ID is shorter than its declared length ({} bytes)", len);
+        }
+        // Borrowed (no allocation) for the ASCII ids these files actually
+        // contain; only malformed input pays for the lossy conversion.
+        buffer.push_str(&String::from_utf8_lossy(&self.id_bytes));
 
         Ok(Some(hash))
     }
@@ -199,7 +343,7 @@ pub fn open_binary_reader<P: AsRef<Path>>(
     // Gzip: detect by extension
     if path.extension().map_or(false, |ext| ext == "gz") {
         let reader: Box<dyn Read + Send> = Box::new(BufReader::with_capacity(IO_BUFFER_SIZE, GzDecoder::new(file)));
-        return Ok(BinaryRecordReader::new(reader));
+        return BinaryRecordReader::new(reader);
     }
 
     // Peek first 4 bytes to auto-detect zstd format
@@ -215,7 +359,7 @@ pub fn open_binary_reader<P: AsRef<Path>>(
         Box::new(buf_reader)
     };
 
-    Ok(BinaryRecordReader::new(reader))
+    BinaryRecordReader::new(reader)
 }
 
 // ================== Compact database format ==================

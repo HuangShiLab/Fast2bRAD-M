@@ -207,7 +207,7 @@ fn write_compact_examples(w: &mut Box<dyn Write>, gcf_table: &[String], examples
 /// record id structure. Determines how records are grouped and labelled.
 #[derive(Clone, Copy, PartialEq)]
 enum StreamKind {
-    /// `*.iibsp`: per-read sample tags (ids are read names) — not grouped.
+    /// `*.iibsp`: per-read sample tags — bare hashes, not grouped.
     SampleReads,
     /// extract default `*.iibdb`: id = contig.
     GenomeContig,
@@ -259,13 +259,15 @@ fn classify_by_name(path: &Path) -> Option<StreamKind> {
 
 fn inspect_stream(path: &Path, args: &InspectArgs, w: &mut Box<dyn Write>) -> Result<()> {
     let mut reader = io_utils::open_binary_reader(path)?;
+    // Id-less streams (sample tags) carry hashes only — nothing to group by.
+    let id_less = reader.is_id_less();
     // Generic `.iibdb` (not `.pos.iibdb`/`.iibsp`): contig ids have no `|`,
     // digest ids do — decide on the first record.
     let decide = |id: &str| {
         if id.contains('|') { StreamKind::GenomeDigest } else { StreamKind::GenomeContig }
     };
 
-    let mut kind = classify_by_name(path);
+    let mut kind = if id_less { Some(StreamKind::SampleReads) } else { classify_by_name(path) };
     let mut examples: Vec<(u64, String)> = Vec::new();
     let mut buf = String::with_capacity(128);
 
@@ -289,7 +291,8 @@ fn inspect_stream(path: &Path, args: &InspectArgs, w: &mut Box<dyn Write>) -> Re
             }
         }
         let kind = kind.unwrap_or(StreamKind::GenomeContig);
-        writeln!(w, "Format:        Binary record stream — {}", kind.describe())?;
+        writeln!(w, "Format:        Binary record stream — {}{}", kind.describe(),
+            if id_less { " (id-less)" } else { "" })?;
         writeln!(w, "{:<15}{}", "Total tags:", total)?;
         if args.distinct {
             writeln!(w, "{:<15}{}", "Distinct tags:", distinct.len())?;
@@ -317,13 +320,21 @@ fn inspect_stream(path: &Path, args: &InspectArgs, w: &mut Box<dyn Write>) -> Re
             }
         }
         let kind = kind.unwrap_or(StreamKind::GenomeContig);
-        writeln!(w, "Format:        Binary record stream — {}", kind.describe())?;
+        writeln!(w, "Format:        Binary record stream — {}{}", kind.describe(),
+            if id_less { " (id-less)" } else { "" })?;
     }
 
     if !examples.is_empty() {
-        writeln!(w, "Example records (tag_hash : id):")?;
-        for (hash, id) in &examples {
-            writeln!(w, "  {:016x}  {}", hash, id)?;
+        if id_less {
+            writeln!(w, "Example records (tag_hash):")?;
+            for (hash, _) in &examples {
+                writeln!(w, "  {:016x}", hash)?;
+            }
+        } else {
+            writeln!(w, "Example records (tag_hash : id):")?;
+            for (hash, id) in &examples {
+                writeln!(w, "  {:016x}  {}", hash, id)?;
+            }
         }
     }
     if !args.full {

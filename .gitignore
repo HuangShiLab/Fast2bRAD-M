@@ -1,0 +1,15 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# Local working data — databases, test runs and large inputs are not distributed
+db/
+test/
+test.bk/
+test_data/
+
+# Nested working repository
+Fast2bM_paper/
+
+# macOS
+.DS_Store

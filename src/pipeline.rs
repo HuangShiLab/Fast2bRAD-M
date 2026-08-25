@@ -190,6 +190,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
                     threads: extract_global_threads,
                     // Read-level QC is generally not needed for reference genomes, but keep parameter consistency
                     quality_control: "no".to_string(),
+                    qc_scope: "auto".to_string(),
                     max_n: args.max_n,
                     min_quality: args.min_quality,
                     min_quality_percent: args.min_quality_percent,
@@ -242,6 +243,7 @@ pub fn run(args: PipelineArgs) -> Result<()> {
                 output_prefix: vec![],
                 threads: extract_global_threads,
                 quality_control: args.quality_control.clone(),
+                qc_scope: "auto".to_string(),
                 max_n: args.max_n,
                 min_quality: args.min_quality,
                 min_quality_percent: args.min_quality_percent,
