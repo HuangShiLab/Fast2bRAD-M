@@ -409,6 +409,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "f2brad-holo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap 4.6.1",
+ "f2brad-core",
+ "f2brad-host",
+ "needletail",
+ "rayon",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "f2brad-host"
 version = "0.1.0"
 dependencies = [

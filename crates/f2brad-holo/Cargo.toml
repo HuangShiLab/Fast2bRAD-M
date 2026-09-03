@@ -1,0 +1,21 @@
+[package]
+name = "f2brad-holo"
+version = "0.1.0"
+edition = "2021"
+authors = ["ZHANG Yufeng"]
+description = "One-pass holo driver for fast2bRAD host + microbiome"
+
+[[bin]]
+name = "f2brad-holo"
+path = "src/main.rs"
+
+[dependencies]
+f2brad-core = { path = "../f2brad-core" }
+f2brad-host = { path = "../f2brad-host" }
+
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+needletail = "0.5"
+rayon = "1.8"
+tracing = "0.1"
+tracing-subscriber = "0.3"

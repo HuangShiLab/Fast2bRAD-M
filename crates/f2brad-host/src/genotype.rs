@@ -52,21 +52,21 @@ pub struct GenotypeArgs {
 }
 
 #[derive(Debug, Clone)]
-struct Locus {
-    contig: String,
-    pos: usize,
-    seq: Vec<u8>,
-    canonical: Vec<u8>,
+pub struct Locus {
+    pub contig: String,
+    pub pos: usize,
+    pub seq: Vec<u8>,
+    pub canonical: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
-struct HostDb {
-    loci: Vec<Locus>,
-    index: HostTagIndex,
+pub struct HostDb {
+    pub loci: Vec<Locus>,
+    pub index: HostTagIndex,
 }
 
 #[derive(Debug, Clone)]
-struct HostTagIndex {
+pub struct HostTagIndex {
     tag_len: usize,
     part_size: usize,
     buckets: Vec<HashMap<Vec<u8>, Vec<usize>>>,
@@ -74,7 +74,7 @@ struct HostTagIndex {
 }
 
 impl HostTagIndex {
-    fn new(loci: &[Locus], max_mismatch: usize) -> Self {
+    pub fn new(loci: &[Locus], max_mismatch: usize) -> Self {
         if loci.is_empty() {
             return Self {
                 tag_len: 0,
@@ -108,7 +108,7 @@ impl HostTagIndex {
 
     /// Find the closest reference tag within `max_mismatch` of `query`. Returns
     /// (locus index, Hamming distance) for the closest match.
-    fn find(&self, query: &[u8], max_mismatch: usize) -> Option<(usize, usize)> {
+    pub fn find(&self, query: &[u8], max_mismatch: usize) -> Option<(usize, usize)> {
         let parts = max_mismatch + 1;
         let mut candidates: Vec<usize> = Vec::new();
         for p in 0..parts {
@@ -197,7 +197,7 @@ pub fn run(args: GenotypeArgs) -> Result<()> {
     Ok(())
 }
 
-fn load_host_db(path: &PathBuf) -> Result<HostDb> {
+pub fn load_host_db(path: &PathBuf) -> Result<HostDb> {
     let file = File::open(path)
         .with_context(|| format!("Failed to open host DB: {}", path.display()))?;
     let reader: Box<dyn BufRead> = if path.extension().map(|e| e == "gz").unwrap_or(false) {
@@ -234,7 +234,7 @@ fn load_host_db(path: &PathBuf) -> Result<HostDb> {
 
 /// One tag-to-locus assignment from a single read.
 #[derive(Debug, Clone)]
-struct ReadMatch {
+pub struct ReadMatch {
     locus_idx: usize,
     dist: usize,
     tag_seq: Vec<u8>,
@@ -242,7 +242,7 @@ struct ReadMatch {
     same_strand: bool,
 }
 
-fn extract_matches(
+pub fn extract_matches(
     seq_bytes: &[u8],
     qual: Option<&[u8]>,
     enzyme: &f2brad_core::enzymes::Enzyme,
@@ -364,13 +364,13 @@ fn process_paired(
     Ok(())
 }
 
-fn canonicalize(seq: &[u8]) -> Vec<u8> {
+pub fn canonicalize(seq: &[u8]) -> Vec<u8> {
     let fwd: Vec<u8> = seq.iter().map(|&b| b.to_ascii_uppercase()).collect();
     let rc = reverse_complement(&fwd);
     if fwd <= rc { fwd } else { rc }
 }
 
-fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     seq.iter()
         .rev()
         .map(|&b| match b {
@@ -383,7 +383,7 @@ fn reverse_complement(seq: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-fn hamming_distance(a: &[u8], b: &[u8]) -> usize {
+pub fn hamming_distance(a: &[u8], b: &[u8]) -> usize {
     a.iter().zip(b.iter()).filter(|(x, y)| x != y).count()
 }
 
