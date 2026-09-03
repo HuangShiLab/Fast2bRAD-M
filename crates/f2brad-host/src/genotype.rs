@@ -220,8 +220,14 @@ pub fn load_host_db(path: &PathBuf, max_mismatch: usize) -> Result<HostDb> {
         }
         let contig = parts[0].to_string();
         let pos: usize = parts[1].parse().with_context(|| format!("Invalid pos on line {}: {}", i + 1, parts[1]))?;
-        let seq = parts[3].as_bytes().to_vec();
-        let canonical = parts[4].as_bytes().to_vec();
+        // Uppercase tag sequences so that lowercase overhang markers from the
+        // digest step do not break base indexing or reference matching.
+        let seq = parts[3].as_bytes().to_ascii_uppercase();
+        // Re-compute the canonical form from the reference orientation tag so
+        // that the lookup index is consistent with how reads are canonicalized
+        // during extraction. The DB may store the plus-strand sequence rather
+        // than the lexicographic minimum.
+        let canonical = canonicalize(&seq);
 
         loci.push(Locus { contig, pos, seq, canonical });
     }
@@ -251,9 +257,12 @@ pub fn extract_matches(
     max_mismatch: usize,
 ) -> Vec<ReadMatch> {
     let mut matches = Vec::new();
-    let tags = enzyme.find_all_tags(seq_bytes);
+    // Work on an uppercased copy so that lowercase read bases are handled
+    // consistently with the uppercase host DB.
+    let seq_upper: Vec<u8> = seq_bytes.to_ascii_uppercase();
+    let tags = enzyme.find_all_tags(&seq_upper);
     for (offset, len) in tags {
-        let tag_seq = &seq_bytes[offset..offset + len];
+        let tag_seq = &seq_upper[offset..offset + len];
         let canonical = canonicalize(tag_seq);
         if let Some((idx, dist)) = db.index.find(&canonical, max_mismatch) {
             let locus = &db.loci[idx];
