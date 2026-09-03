@@ -10,12 +10,12 @@ use tracing;
 
 use crate::build_qual_db;
 use crate::build_quan_db;
-use crate::extract;
 use crate::find_genome;
 use crate::merge;
 use crate::predict;
 use crate::quantify;
-use crate::enzymes::{enzyme_by_id, enzyme_by_name};
+use f2brad_core::enzymes::{enzyme_by_id, enzyme_by_name};
+use f2brad_core::extract;
 
 // --- PipelineArgs struct ---
 

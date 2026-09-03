@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing;
 
-use crate::enzymes::{enzyme_by_id, enzyme_by_name};
-use crate::io_utils;
+use f2brad_core::enzymes::{enzyme_by_id, enzyme_by_name};
+use f2brad_core::io_utils;
 
 // Interned string type: Arc<str> allows cheap cloning (atomic refcount increment)
 // instead of full heap allocation for each String::clone()
@@ -237,7 +237,7 @@ fn process_sample(
     tag_to_gcfs: &FxHashMap<u64, Vec<Istr>>,
     gcf_to_taxonomy: &FxHashMap<Istr, Istr>,
     taxon_theory: &TaxonTheoryMap,
-    enzyme: &crate::enzymes::Enzyme,
+    enzyme: &f2brad_core::enzymes::Enzyme,
     output_dir: &Path,
     g_score_threshold: f64,
     verbose: bool,

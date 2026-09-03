@@ -1,0 +1,18 @@
+[package]
+name = "f2brad-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["ZHANG Yufeng"]
+description = "Core 2bRAD tag extraction, enzyme definitions, and I/O utilities for Fast2bRAD-M"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+fxhash = "0.2"
+indicatif = "0.17"
+needletail = "0.5"
+rayon = "1.8"
+regex = "1"
+tracing = "0.1"
+flate2 = "1.0"
+zstd = "0.13"

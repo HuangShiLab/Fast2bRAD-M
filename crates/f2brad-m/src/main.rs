@@ -1,18 +1,15 @@
 mod build_qual_db;
 mod build_quan_db;
-mod enzymes;
-mod extract;
 mod find_genome;
 mod inspect;
-mod io_utils;
 mod merge;
 mod pipeline;
 mod predict;
 mod quantify;
-mod types;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use f2brad_core::extract::ExtractArgs;
 use tracing_subscriber;
 
 use tikv_jemallocator::Jemalloc;
@@ -34,7 +31,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// In-silico restriction digestion: extract 2bRAD tags from sequences at enzyme sites
-    Extract(extract::ExtractArgs),
+    Extract(ExtractArgs),
     /// Build qualitative database: build a taxon-specific tag database from reference genomes
     BuildQualDb(build_qual_db::BuildQualDbArgs),
     /// Build quantitative database: output unique tags only
@@ -70,7 +67,7 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Commands::Extract(args) => extract::run(args),
+        Commands::Extract(args) => f2brad_core::extract::run(args),
         Commands::BuildQualDb(args) => build_qual_db::run(args),
         Commands::BuildQuanDb(args) => build_quan_db::run(args),
         Commands::Quantify(args) => quantify::run(args),
