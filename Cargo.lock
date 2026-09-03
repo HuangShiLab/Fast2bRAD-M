@@ -416,6 +416,7 @@ dependencies = [
  "clap 4.6.1",
  "f2brad-core",
  "f2brad-host",
+ "flate2",
  "needletail",
  "rayon",
  "tracing",

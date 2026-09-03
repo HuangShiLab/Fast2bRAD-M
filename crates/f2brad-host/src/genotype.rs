@@ -153,11 +153,12 @@ pub fn run(args: GenotypeArgs) -> Result<()> {
     std::fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("Failed to create output directory: {}", args.output_dir.display()))?;
 
+    let max_mismatch = args.max_mismatch.max(1).min(3);
+
     tracing::info!("Loading host DB from {}", args.db.display());
-    let db = load_host_db(&args.db)?;
+    let db = load_host_db(&args.db, max_mismatch)?;
     tracing::info!("Loaded {} host tags", db.loci.len());
 
-    let max_mismatch = args.max_mismatch.max(1).min(3);
     tracing::info!("Building host tag index for Hamming distance <= {}", max_mismatch);
     let db = HostDb {
         index: HostTagIndex::new(&db.loci, max_mismatch),
@@ -197,7 +198,7 @@ pub fn run(args: GenotypeArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn load_host_db(path: &PathBuf) -> Result<HostDb> {
+pub fn load_host_db(path: &PathBuf, max_mismatch: usize) -> Result<HostDb> {
     let file = File::open(path)
         .with_context(|| format!("Failed to open host DB: {}", path.display()))?;
     let reader: Box<dyn BufRead> = if path.extension().map(|e| e == "gz").unwrap_or(false) {
@@ -229,17 +230,17 @@ pub fn load_host_db(path: &PathBuf) -> Result<HostDb> {
         bail!("Host DB contains no loci");
     }
 
-    Ok(HostDb { loci, index: HostTagIndex::new(&[], 2) })
+    Ok(HostDb { loci: loci.clone(), index: HostTagIndex::new(&loci, max_mismatch) })
 }
 
 /// One tag-to-locus assignment from a single read.
 #[derive(Debug, Clone)]
 pub struct ReadMatch {
-    locus_idx: usize,
-    dist: usize,
-    tag_seq: Vec<u8>,
-    qual: Vec<u8>,
-    same_strand: bool,
+    pub locus_idx: usize,
+    pub dist: usize,
+    pub tag_seq: Vec<u8>,
+    pub qual: Vec<u8>,
+    pub same_strand: bool,
 }
 
 pub fn extract_matches(
@@ -273,7 +274,7 @@ pub fn extract_matches(
     matches
 }
 
-fn add_match_to_pileup(m: &ReadMatch, min_qual: u8, db: &HostDb, pileup: &mut Pileup) {
+pub fn add_match_to_pileup(m: &ReadMatch, min_qual: u8, db: &HostDb, pileup: &mut Pileup) {
     let locus = &db.loci[m.locus_idx];
     pileup.add_read(&locus.seq, &m.tag_seq, &m.qual, m.same_strand, min_qual, m.locus_idx, m.dist);
 }
@@ -388,7 +389,7 @@ pub fn hamming_distance(a: &[u8], b: &[u8]) -> usize {
 }
 
 /// Per-locus, per-position pileup.
-struct Pileup {
+pub struct Pileup {
     /// depth[locus][position] = number of contributing reads
     depth: Vec<Vec<usize>>,
     /// counts[locus][position][base] = number of observations
@@ -411,7 +412,7 @@ const BASE_TO_IDX: [usize; 256] = {
 const IDX_TO_BASE: [u8; 4] = [b'A', b'C', b'G', b'T'];
 
 impl Pileup {
-    fn new(n_loci: usize, tag_len: usize) -> Self {
+    pub fn new(n_loci: usize, tag_len: usize) -> Self {
         Self {
             depth: vec![vec![0; tag_len]; n_loci],
             counts: vec![vec![[0; 4]; tag_len]; n_loci],
@@ -420,7 +421,7 @@ impl Pileup {
         }
     }
 
-    fn add_read(
+    pub fn add_read(
         &mut self,
         ref_tag: &[u8],
         read_tag: &[u8],
@@ -474,7 +475,7 @@ fn complement(base: u8) -> u8 {
     }
 }
 
-fn write_vcf(
+pub fn write_vcf(
     path: &PathBuf,
     loci: &[Locus],
     pileup: &Pileup,
@@ -579,7 +580,7 @@ fn write_vcf(
 
 /// Write a GEMMA BIMBAM-format mean-genotype file.
 /// Columns: SNP_id A1_allele A2_allele dosage
-fn write_bimbam(
+pub fn write_bimbam(
     path: &PathBuf,
     loci: &[Locus],
     pileup: &Pileup,
