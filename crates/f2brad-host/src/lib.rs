@@ -7,3 +7,4 @@
 pub mod build_db;
 pub mod cross;
 pub mod digest;
+pub mod genotype;

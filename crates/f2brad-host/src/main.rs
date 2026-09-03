@@ -16,6 +16,8 @@ enum Commands {
     Cross(f2brad_host::cross::CrossArgs),
     /// Build a host tag database from digest output and an optional cross-mask.
     BuildDb(f2brad_host::build_db::BuildDbArgs),
+    /// Genotype a 2bRAD sample against a host tag database.
+    Genotype(f2brad_host::genotype::GenotypeArgs),
 }
 
 fn main() -> Result<()> {
@@ -25,5 +27,6 @@ fn main() -> Result<()> {
         Commands::Digest(args) => f2brad_host::digest::run(args),
         Commands::Cross(args) => f2brad_host::cross::run(args),
         Commands::BuildDb(args) => f2brad_host::build_db::run(args),
+        Commands::Genotype(args) => f2brad_host::genotype::run(args),
     }
 }
