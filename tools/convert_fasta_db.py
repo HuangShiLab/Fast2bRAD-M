@@ -198,7 +198,7 @@ def convert_fasta_to_iibdb(
 
         # Records (zstd compressed)
         compressor = zstd.ZstdCompressor(level=3)
-        with compressor.stream_writer(fh) as writer:
+        with compressor.stream_writer(fh, closefd=False) as writer:
             for gcf_id in gcf_order:
                 idx = gcf_to_idx[gcf_id]
                 for seq in per_gcf_tags[gcf_id]:
