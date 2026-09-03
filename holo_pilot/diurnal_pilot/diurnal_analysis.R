@@ -36,6 +36,10 @@ micro <- micro[common, , drop = FALSE]
 host <- host[common, , drop = FALSE]
 meta <- meta[common, , drop = FALSE]
 
+# Treat experimental design variables as categorical
+meta$subject_id <- as.factor(meta$subject_id)
+meta$time_point <- as.factor(meta$time_point)
+
 # Replace missing host dosages (-1) with mean
 host[host == -1] <- NA
 host <- as.data.frame(lapply(host, function(x) {
