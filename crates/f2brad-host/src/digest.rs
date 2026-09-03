@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
@@ -30,6 +30,11 @@ pub struct DigestArgs {
     #[arg(long = "max-mismatch", default_value = "2")]
     pub max_mismatch: usize,
 
+    /// Optional BED file of CpG islands. If provided, each tag is annotated
+    /// with whether it overlaps a CpG island.
+    #[arg(long = "cpg-islands")]
+    pub cpg_islands: Option<PathBuf>,
+
     /// Number of parallel threads
     #[arg(short = 'j', long = "threads", default_value = "4")]
     pub threads: usize,
@@ -43,6 +48,9 @@ struct Locus {
     seq: Vec<u8>,
     canonical: Vec<u8>,
     hash: Hash,
+    gc_frac: f64,
+    cpg_count: usize,
+    in_cpg_island: bool,
 }
 
 pub fn run(args: DigestArgs) -> Result<()> {
@@ -68,7 +76,8 @@ pub fn run(args: DigestArgs) -> Result<()> {
 
     while let Some(record) = reader.next() {
         let record = record.with_context(|| "Failed to read FASTA record")?;
-        let id = String::from_utf8_lossy(record.id()).to_string();
+        let full_header = String::from_utf8_lossy(record.id());
+        let id = full_header.split_whitespace().next().unwrap_or("unnamed").to_string();
         let seq = record.seq();
         let seq_bytes = seq.as_ref();
         contig_count += 1;
@@ -85,6 +94,7 @@ pub fn run(args: DigestArgs) -> Result<()> {
                 (rc, '-')
             };
             let hash = canonical_hash(&canonical);
+            let (gc_frac, cpg_count) = sequence_composition(&canonical);
             loci.push(Locus {
                 contig: id.clone(),
                 pos: offset,
@@ -92,11 +102,24 @@ pub fn run(args: DigestArgs) -> Result<()> {
                 seq: tag_seq.to_vec(),
                 canonical,
                 hash,
+                gc_frac,
+                cpg_count,
+                in_cpg_island: false,
             });
         }
     }
 
     tracing::info!("Found {} sites in {} contigs ({} bases)", loci.len(), contig_count, total_bases);
+
+    // Optional CpG-island annotation.
+    if let Some(bed_path) = &args.cpg_islands {
+        tracing::info!("Loading CpG-island BED: {}", bed_path.display());
+        let islands = load_cpg_islands(bed_path)?;
+        annotate_cpg_islands(&mut loci, &islands, args.threads);
+        let island_count = loci.iter().filter(|l| l.in_cpg_island).count();
+        tracing::info!("Tags overlapping CpG islands: {} / {} ({:.2}%)", island_count, loci.len(),
+            if loci.is_empty() { 0.0 } else { island_count as f64 / loci.len() as f64 * 100.0 });
+    }
 
     // Uniqueness analysis: a tag is usable if no other genomic tag lies within
     // `max_mismatch` Hamming distance of it. Uses the pigeonhole principle for
@@ -115,17 +138,20 @@ pub fn run(args: DigestArgs) -> Result<()> {
         let file = File::create(&sites_path)
             .with_context(|| format!("Failed to create sites file: {}", sites_path.display()))?;
         let mut writer = BufWriter::new(file);
-        writeln!(writer, "contig\tpos\tstrand\tseq\tcanonical\thash\tunique")?;
+        writeln!(writer, "contig\tpos\tstrand\tseq\tcanonical\thash\tgc_frac\tcpg_count\tcpg_island\tunique")?;
         for (locus, is_unique) in loci.iter().zip(unique.iter()) {
             writeln!(
                 writer,
-                "{}\t{}\t{}\t{}\t{}\t{:016x}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{:016x}\t{:.4}\t{}\t{}\t{}",
                 locus.contig,
                 locus.pos,
                 locus.strand,
                 String::from_utf8_lossy(&locus.seq),
                 String::from_utf8_lossy(&locus.canonical),
                 locus.hash,
+                locus.gc_frac,
+                locus.cpg_count,
+                if locus.in_cpg_island { 1 } else { 0 },
                 if *is_unique { 1 } else { 0 }
             )?;
         }
@@ -134,13 +160,24 @@ pub fn run(args: DigestArgs) -> Result<()> {
     // Write summary statistics.
     let stats_path = args.output_dir.join(format!("{}.stat.tsv", enzyme.name));
     {
+        let avg_gc = if loci.is_empty() {
+            0.0
+        } else {
+            loci.iter().map(|l| l.gc_frac).sum::<f64>() / loci.len() as f64
+        };
+        let avg_cpg = if loci.is_empty() {
+            0.0
+        } else {
+            loci.iter().map(|l| l.cpg_count).sum::<usize>() as f64 / loci.len() as f64
+        };
+        let island_count = loci.iter().filter(|l| l.in_cpg_island).count();
         let file = File::create(&stats_path)
             .with_context(|| format!("Failed to create stats file: {}", stats_path.display()))?;
         let mut writer = BufWriter::new(file);
-        writeln!(writer, "enzyme\ttag_length\tcontigs\ttotal_bases\tsites\tunique_sites\tunique_fraction\tmax_mismatch")?;
+        writeln!(writer, "enzyme\ttag_length\tcontigs\ttotal_bases\tsites\tunique_sites\tunique_fraction\tmax_mismatch\tavg_gc_frac\tavg_cpg_count\tcpg_island_tags")?;
         writeln!(
             writer,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{:.4}\t{:.4}\t{}",
             enzyme.name,
             enzyme.tag_length,
             contig_count,
@@ -148,7 +185,10 @@ pub fn run(args: DigestArgs) -> Result<()> {
             loci.len(),
             unique_count,
             unique_frac,
-            max_mismatch
+            max_mismatch,
+            avg_gc,
+            avg_cpg,
+            island_count
         )?;
     }
 
@@ -167,6 +207,86 @@ fn reverse_complement(seq: &[u8]) -> Vec<u8> {
             x => x,
         })
         .collect()
+}
+
+fn sequence_composition(seq: &[u8]) -> (f64, usize) {
+    let len = seq.len();
+    if len == 0 {
+        return (0.0, 0);
+    }
+    let mut gc = 0usize;
+    let mut cpg = 0usize;
+    for &b in seq {
+        if b == b'G' || b == b'g' || b == b'C' || b == b'c' {
+            gc += 1;
+        }
+    }
+    for window in seq.windows(2) {
+        if (window[0] == b'C' || window[0] == b'c') && (window[1] == b'G' || window[1] == b'g') {
+            cpg += 1;
+        }
+    }
+    (gc as f64 / len as f64, cpg)
+}
+
+#[derive(Debug, Clone)]
+struct BedInterval {
+    contig: String,
+    start: usize,
+    end: usize,
+}
+
+fn load_cpg_islands(path: &PathBuf) -> Result<Vec<BedInterval>> {
+    let file = File::open(path)
+        .with_context(|| format!("Failed to open CpG-island BED: {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut intervals = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let contig = parts[0].to_string();
+        let start: usize = parts[1].parse().with_context(|| format!("Invalid BED start: {}", parts[1]))?;
+        let end: usize = parts[2].parse().with_context(|| format!("Invalid BED end: {}", parts[2]))?;
+        intervals.push(BedInterval { contig, start, end });
+    }
+    intervals.sort_by(|a, b| a.contig.cmp(&b.contig).then(a.start.cmp(&b.start)));
+    Ok(intervals)
+}
+
+fn annotate_cpg_islands(loci: &mut [Locus], islands: &[BedInterval], threads: usize) {
+    // Build a map from contig to sorted intervals for fast lookup.
+    let mut by_contig: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    for island in islands {
+        by_contig.entry(island.contig.clone()).or_default().push((island.start, island.end));
+    }
+    for intervals in by_contig.values_mut() {
+        intervals.sort_by_key(|&(s, _)| s);
+    }
+
+    let _ = threads; // rayon global pool is configured by the caller
+    loci.par_iter_mut().for_each(|locus| {
+        let tag_start = locus.pos;
+        let tag_end = locus.pos + locus.canonical.len();
+        if let Some(intervals) = by_contig.get(&locus.contig) {
+            locus.in_cpg_island = intervals
+                .binary_search_by(|&(s, e)| {
+                    if e <= tag_start {
+                        std::cmp::Ordering::Less
+                    } else if s >= tag_end {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .is_ok();
+        }
+    });
 }
 
 /// Compute a boolean mask: true if the tag at this locus has no other tag in
