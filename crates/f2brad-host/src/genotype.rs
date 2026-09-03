@@ -55,6 +55,7 @@ pub struct GenotypeArgs {
 pub struct Locus {
     pub contig: String,
     pub pos: usize,
+    pub strand: char,
     pub seq: Vec<u8>,
     pub canonical: Vec<u8>,
 }
@@ -220,6 +221,7 @@ pub fn load_host_db(path: &PathBuf, max_mismatch: usize) -> Result<HostDb> {
         }
         let contig = parts[0].to_string();
         let pos: usize = parts[1].parse().with_context(|| format!("Invalid pos on line {}: {}", i + 1, parts[1]))?;
+        let strand = parts[2].chars().next().unwrap_or('+');
         // Uppercase tag sequences so that lowercase overhang markers from the
         // digest step do not break base indexing or reference matching.
         let seq = parts[3].as_bytes().to_ascii_uppercase();
@@ -229,7 +231,7 @@ pub fn load_host_db(path: &PathBuf, max_mismatch: usize) -> Result<HostDb> {
         // than the lexicographic minimum.
         let canonical = canonicalize(&seq);
 
-        loci.push(Locus { contig, pos, seq, canonical });
+        loci.push(Locus { contig, pos, strand, seq, canonical });
     }
 
     if loci.is_empty() {
@@ -503,27 +505,36 @@ pub fn write_vcf(
     writeln!(writer, "##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"Allelic depths\">")?;
     writeln!(writer, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample")?;
 
-    // Collect callable records and sort by contig/position.
-    let mut records: Vec<(usize, usize, usize)> = Vec::new(); // (locus_idx, ref_pos, tag_pos)
-    for (locus_idx, locus) in loci.iter().enumerate() {
+    // Collect callable records and sort by forward-strand reference position.
+    let mut records: Vec<(usize, usize)> = Vec::new(); // (locus_idx, tag_pos)
+    for (locus_idx, _locus) in loci.iter().enumerate() {
         for (tag_pos, &depth) in pileup.depth[locus_idx].iter().enumerate() {
             if depth >= min_depth {
-                records.push((locus_idx, locus.pos + tag_pos, tag_pos));
+                records.push((locus_idx, tag_pos));
             }
         }
     }
-    records.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
-    // Stable grouping by contig is implicit because locus.pos is monotonic within
-    // a contig in the input DB, but contig order is alphabetical. We keep the
-    // DB order (records are already grouped by locus).
+    let genomic_pos = |locus: &Locus, tag_pos: usize| {
+        if locus.strand == '-' {
+            locus.pos + (locus.seq.len() - 1 - tag_pos)
+        } else {
+            locus.pos + tag_pos
+        }
+    };
+    records.sort_by(|a, b| {
+        let a_pos = genomic_pos(&loci[a.0], a.1);
+        let b_pos = genomic_pos(&loci[b.0], b.1);
+        a_pos.cmp(&b_pos).then(a.1.cmp(&b.1))
+    });
 
     let mut prev_locus = usize::MAX;
-    for (locus_idx, genomic_pos, tag_pos) in records {
+    for (locus_idx, tag_pos) in records {
         if locus_idx != prev_locus {
             // Nothing special needed; contig is carried in the locus.
             prev_locus = locus_idx;
         }
         let locus = &loci[locus_idx];
+        let genomic_pos = genomic_pos(locus, tag_pos);
         let ref_base = locus.seq[tag_pos];
         let counts = pileup.counts[locus_idx][tag_pos];
         let depth = pileup.depth[locus_idx][tag_pos];
@@ -628,7 +639,12 @@ pub fn write_bimbam(
             let gl = genotype_likelihoods(ref_base, alt_base, &counts, &pileup.qual_sums[locus_idx][tag_pos]);
             let dosage = genotype_dosage(&gl);
 
-            let snp_id = format!("{}_{}", locus.contig, locus.pos + tag_pos + 1);
+            let genomic_pos = if locus.strand == '-' {
+                locus.pos + (locus.seq.len() - 1 - tag_pos)
+            } else {
+                locus.pos + tag_pos
+            };
+            let snp_id = format!("{}_{}", locus.contig, genomic_pos + 1);
             writeln!(
                 writer,
                 "{}\t{}\t{}\t{:.4}",
