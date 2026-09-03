@@ -416,6 +416,7 @@ dependencies = [
  "clap 4.6.1",
  "f2brad-core",
  "fxhash",
+ "indicatif",
  "needletail",
  "rayon",
  "tracing",
@@ -635,6 +636,7 @@ dependencies = [
  "console",
  "number_prefix",
  "portable-atomic",
+ "rayon",
  "unicode-width 0.2.2",
  "web-time",
 ]

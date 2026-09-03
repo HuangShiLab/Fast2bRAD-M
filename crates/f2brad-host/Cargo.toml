@@ -15,6 +15,7 @@ f2brad-core = { path = "../f2brad-core" }
 anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }
 fxhash = "0.2"
+indicatif = { version = "0.17", features = ["rayon"] }
 rayon = "1.8"
 tracing = "0.1"
 tracing-subscriber = "0.3"

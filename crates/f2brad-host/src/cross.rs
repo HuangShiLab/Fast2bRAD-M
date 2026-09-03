@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
+use indicatif::{ParallelProgressIterator, ProgressStyle};
 use needletail::parse_fastx_file;
 use rayon::prelude::*;
 use tracing;
@@ -78,8 +79,16 @@ pub fn run(args: CrossArgs) -> Result<()> {
     tracing::info!("Loaded {} genome entries", genomes.len());
 
     // Process genomes in parallel. Each thread collects collisions for its subset.
+    let pb = indicatif::ProgressBar::new(genomes.len() as u64)
+        .with_style(
+            ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({per_sec}) {msg}")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+    pb.set_message("microbial genomes");
     let results: Vec<Vec<CollisionRecord>> = genomes
         .par_iter()
+        .progress_with(pb)
         .map(|(species, path)| {
             process_microbial_genome(species, path, &index, max_mismatch, enzyme)
         })
