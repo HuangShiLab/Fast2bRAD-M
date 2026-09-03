@@ -139,11 +139,18 @@ if (!is.null(wms_path) && file.exists(wms_path)) {
   wms <- read_tsv(wms_path, show_col_types = FALSE) %>%
     column_to_rownames("...1")
   common_taxa <- intersect(colnames(prop), colnames(wms))
-  wms <- wms[rownames(prop), common_taxa, drop = FALSE]
-  wms_prop <- wms / rowSums(wms)
+  common_samples <- intersect(rownames(prop), rownames(wms))
+  wms_sub <- wms[common_samples, common_taxa, drop = FALSE]
+  prop_sub <- prop[common_samples, common_taxa, drop = FALSE]
+  wms_prop <- wms_sub / rowSums(wms_sub)
+  wms_prop[is.na(wms_prop)] <- 0
+  prop_sub <- prop_sub / rowSums(prop_sub)
+  prop_sub[is.na(prop_sub)] <- 0
   dist_wms <- vegdist(wms_prop, method = "bray")
+  dist_2brad <- vegdist(prop_sub, method = "bray")
   pcoa_wms <- cmdscale(dist_wms, k = 2)
-  proc <- procrustes(pcoa$points, pcoa_wms)
+  pcoa_2brad <- cmdscale(dist_2brad, k = 2)
+  proc <- procrustes(pcoa_2brad, pcoa_wms)
   write("\n=== Procrustes 2bRAD-M vs WMS ===", stdout())
   print(summary(proc))
   pdf(file.path(out_dir, "procrustes_2bradm_wms.pdf"), width = 6, height = 5)
