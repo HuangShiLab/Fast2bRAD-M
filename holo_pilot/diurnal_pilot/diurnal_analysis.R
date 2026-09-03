@@ -94,7 +94,7 @@ pcoa <- cmdscale(dist_bc, k = 2, eig = TRUE)
 meta$PCo1 <- pcoa$points[, 1]
 meta$PCo2 <- pcoa$points[, 2]
 
-p <- ggplot(meta, aes(x = PCo1, y = PCo2, color = subject_id, shape = time_point)) +
+p <- ggplot(meta, aes(x = PCo1, y = PCo2, color = time_point, shape = subject_id)) +
   geom_point(size = 3) +
   theme_minimal() +
   labs(title = "PCoA of 2bRAD-M species (Bray-Curtis)")
@@ -114,14 +114,19 @@ taxa_to_test <- names(which(colSums(clr != 0) >= nrow(clr) * 0.25))
 
 mixed_results <- lapply(taxa_to_test, function(taxon) {
   df <- meta %>% mutate(abn = clr[, taxon])
-  m <- lmer(abn ~ time_point + host_fraction + (1 | subject_id), data = df)
-  s <- summary(m)$coefficients
+  m <- tryCatch(
+    lmer(abn ~ time_point + host_fraction + (1 | subject_id), data = df),
+    error = function(e) NULL
+  )
+  if (is.null(m)) return(NULL)
+  s <- as.data.frame(summary(m)$coefficients)
+  s$p_value <- if ("Pr(>|t|)" %in% colnames(s)) s[, "Pr(>|t|)"] else NA_real_
   data.frame(
     taxon = taxon,
     term = rownames(s),
     estimate = s[, "Estimate"],
     std_error = s[, "Std. Error"],
-    p_value = s[, "Pr(>|t|)"]
+    p_value = s$p_value
   )
 })
 mixed_df <- bind_rows(mixed_results)
