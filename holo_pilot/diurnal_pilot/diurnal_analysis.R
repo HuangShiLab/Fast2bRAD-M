@@ -26,9 +26,9 @@ dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 micro <- read_tsv(file.path(feature_dir, "microbiome_clr.tsv"), show_col_types = FALSE) %>%
   column_to_rownames("...1")
 host <- read_tsv(file.path(feature_dir, "host_features.tsv"), show_col_types = FALSE) %>%
-  column_to_rownames("...1")
+  column_to_rownames("sample_id")
 meta <- read_tsv(file.path(feature_dir, "sample_metadata.tsv"), show_col_types = FALSE) %>%
-  column_to_rownames("...1")
+  column_to_rownames("sample_id")
 
 # Ensure same order
 common <- intersect(rownames(micro), rownames(meta))
