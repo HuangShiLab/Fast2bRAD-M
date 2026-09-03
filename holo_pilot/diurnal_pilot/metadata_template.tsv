@@ -1,0 +1,3 @@
+sample_id	subject_id	time_point	r1	r2
+S01_T1	S01	T1	/path/to/S01_T1_R1.fq.gz	/path/to/S01_T1_R2.fq.gz
+S01_T2	S01	T2	/path/to/S01_T2_R1.fq.gz	/path/to/S01_T2_R2.fq.gz
