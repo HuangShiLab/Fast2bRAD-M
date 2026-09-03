@@ -4,4 +4,5 @@
 //! Output: a locus-keyed tag database, per-position genotype likelihoods, and
 //! VCF/BIMBAM files.
 
+pub mod cross;
 pub mod digest;
