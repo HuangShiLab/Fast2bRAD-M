@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
@@ -9,9 +10,10 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use needletail::parse_fastx_file;
+use rayon::prelude::*;
 use tracing;
 
-use f2brad_core::enzymes::{enzyme_by_id, enzyme_by_name};
+use f2brad_core::enzymes::{Enzyme, enzyme_by_id, enzyme_by_name};
 use f2brad_core::extract::Hash;
 use f2brad_core::io_utils::{open_compact_reader, write_sample_tag_header};
 use f2brad_host::genotype::{
@@ -54,13 +56,19 @@ struct ClassifyArgs {
     #[arg(long = "microbe-mask")]
     microbe_mask: Option<PathBuf>,
 
-    /// Read 1 FASTQ/FASTA (may be gzip-compressed)
-    #[arg(short = '1', long = "r1", required = true)]
-    r1: PathBuf,
+    /// Read 1 FASTQ/FASTA (may be gzip-compressed). Required unless --sample-list is given.
+    #[arg(short = '1', long = "r1")]
+    r1: Option<PathBuf>,
 
     /// Optional read 2 FASTQ/FASTA (paired-end)
     #[arg(short = '2', long = "r2")]
     r2: Option<PathBuf>,
+
+    /// Sample list TSV: sample_name<TAB>r1_path[<TAB>r2_path].
+    /// When provided, --r1/--r2/--sample-name are ignored and all samples are
+    /// processed in parallel subdirectories of --output.
+    #[arg(short = 'l', long = "sample-list")]
+    sample_list: Option<PathBuf>,
 
     /// Enzyme name (e.g. BcgI, BsaXI, AlfI) or numeric ID (1–16)
     #[arg(short = 's', long = "site", required = true)]
@@ -70,7 +78,7 @@ struct ClassifyArgs {
     #[arg(short = 'o', long = "output", required = true)]
     output_dir: PathBuf,
 
-    /// Sample name used in output files
+    /// Sample name used in output files. Required unless --sample-list is given.
     #[arg(long = "sample-name", default_value = "sample")]
     sample_name: String,
 
@@ -125,7 +133,7 @@ mod classify {
         let max_mismatch = args.host_max_mismatch.max(1).min(3);
 
         tracing::info!("Loading host DB from {}", args.host_db.display());
-        let host_db = load_host_db(&args.host_db, max_mismatch)?;
+        let host_db = Arc::new(load_host_db(&args.host_db, max_mismatch)?);
         tracing::info!("Loaded {} host tags", host_db.loci.len());
 
         tracing::info!("Loading microbial DB from {}", args.microbe_db.display());
@@ -141,9 +149,11 @@ mod classify {
             microbe_hashes
         };
         tracing::info!("{} microbial hashes remain after masking", microbe_hashes.len());
+        let microbe_hashes = Arc::new(microbe_hashes);
+        let hash_to_gcfs = Arc::new(hash_to_gcfs);
 
         let tax_level_idx = taxonomy_level_index(&args.taxonomy_level)?;
-        let taxonomy = if let Some(db_dir) = &args.microbe_db_dir {
+        let taxonomy: Option<HashMap<String, Vec<String>>> = if let Some(db_dir) = &args.microbe_db_dir {
             let tax_path = db_dir.join("abfh_classify_with_speciename.txt.gz");
             if tax_path.exists() {
                 Some(load_taxonomy(&tax_path)?)
@@ -154,15 +164,128 @@ mod classify {
         } else {
             None
         };
+        let taxonomy = Arc::new(taxonomy);
 
+        let samples = if let Some(list_path) = &args.sample_list {
+            parse_sample_list(list_path)?
+        } else {
+            let r1 = args.r1.as_ref()
+                .ok_or_else(|| anyhow!("--r1 is required when --sample-list is not provided"))?;
+            vec![SampleEntry {
+                name: args.sample_name.clone(),
+                r1: r1.clone(),
+                r2: args.r2.clone(),
+            }]
+        };
+
+        if samples.is_empty() {
+            bail!("No samples to process");
+        }
+
+        tracing::info!("Processing {} sample(s) in parallel", samples.len());
+
+        let min_qual = args.min_qual;
+        let min_depth = args.min_depth;
+        let taxonomy_level = args.taxonomy_level.clone();
+        let output_iibsp = args.output_iibsp;
+        let output_dir = args.output_dir.clone();
+
+        let results: Vec<Result<()>> = samples
+            .par_iter()
+            .map(|sample| {
+                let sample_output = output_dir.join(&sample.name);
+                std::fs::create_dir_all(&sample_output)
+                    .with_context(|| format!("Failed to create sample directory: {}", sample_output.display()))?;
+                process_one_sample(
+                    &sample.name,
+                    &sample.r1,
+                    sample.r2.as_ref(),
+                    enzyme,
+                    &host_db,
+                    &microbe_hashes,
+                    &hash_to_gcfs,
+                    taxonomy.as_ref().as_ref(),
+                    tax_level_idx,
+                    max_mismatch,
+                    min_qual,
+                    min_depth,
+                    &taxonomy_level,
+                    output_iibsp,
+                    &sample_output,
+                )
+            })
+            .collect();
+
+        for (sample, result) in samples.iter().zip(results.iter()) {
+            match result {
+                Ok(_) => tracing::info!("Sample {} completed", sample.name),
+                Err(e) => tracing::error!("Sample {} failed: {}", sample.name, e),
+            }
+        }
+
+        // Return first error, if any.
+        for result in results {
+            result?;
+        }
+
+        Ok(())
+    }
+
+    struct SampleEntry {
+        name: String,
+        r1: PathBuf,
+        r2: Option<PathBuf>,
+    }
+
+    fn parse_sample_list(path: &PathBuf) -> Result<Vec<SampleEntry>> {
+        let file = File::open(path)
+            .with_context(|| format!("Failed to open sample list: {}", path.display()))?;
+        let reader = BufReader::new(file);
+        let mut samples = Vec::new();
+        for (i, line) in reader.lines().enumerate() {
+            let line = line?;
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 2 {
+                bail!("Invalid sample list line {}: expected at least 2 columns", i + 1);
+            }
+            samples.push(SampleEntry {
+                name: parts[0].to_string(),
+                r1: PathBuf::from(parts[1]),
+                r2: parts.get(2).map(|s| PathBuf::from(s)),
+            });
+        }
+        Ok(samples)
+    }
+
+    fn process_one_sample(
+        sample_name: &str,
+        r1: &PathBuf,
+        r2: Option<&PathBuf>,
+        enzyme: &Enzyme,
+        host_db: &HostDb,
+        microbe_hashes: &HashSet<Hash>,
+        hash_to_gcfs: &HashMap<Hash, Vec<String>>,
+        taxonomy: Option<&HashMap<String, Vec<String>>>,
+        tax_level_idx: usize,
+        max_mismatch: usize,
+        min_qual: u8,
+        min_depth: usize,
+        taxonomy_level: &str,
+        output_iibsp: bool,
+        output_dir: &PathBuf,
+    ) -> Result<()> {
         let mut stats = ClassifyStats::default();
         let mut pileup = Pileup::new(host_db.loci.len(), host_db.loci[0].canonical.len());
         let mut gcf_counts: HashMap<String, usize> = HashMap::new();
         let mut taxon_counts: HashMap<String, usize> = HashMap::new();
 
-        let iibsp_path = args.output_dir.join(format!("{}.iibsp.gz", args.sample_name));
+        let iibsp_path = output_dir.join(format!("{}.iibsp.gz", sample_name));
         let mut iibsp_sink: std::io::Sink = std::io::sink();
-        let mut iibsp_encoder: Option<GzEncoder<BufWriter<File>>> = if args.output_iibsp {
+        let mut iibsp_encoder: Option<GzEncoder<BufWriter<File>>> = if output_iibsp {
             let iibsp_file = File::create(&iibsp_path)
                 .with_context(|| format!("Failed to create iibsp output: {}", iibsp_path.display()))?;
             let iibsp_buf = BufWriter::with_capacity(128 * 1024, iibsp_file);
@@ -179,18 +302,18 @@ mod classify {
             &mut iibsp_sink
         };
 
-        if let Some(r2) = &args.r2 {
+        if let Some(r2) = r2 {
             classify_paired(
-                &args.r1,
+                r1,
                 r2,
                 enzyme,
-                &host_db,
-                &microbe_hashes,
-                &hash_to_gcfs,
-                taxonomy.as_ref(),
+                host_db,
+                microbe_hashes,
+                hash_to_gcfs,
+                taxonomy,
                 tax_level_idx,
                 max_mismatch,
-                args.min_qual,
+                min_qual,
                 &mut stats,
                 &mut pileup,
                 &mut gcf_counts,
@@ -199,15 +322,15 @@ mod classify {
             )?;
         } else {
             classify_single(
-                &args.r1,
+                r1,
                 enzyme,
-                &host_db,
-                &microbe_hashes,
-                &hash_to_gcfs,
-                taxonomy.as_ref(),
+                host_db,
+                microbe_hashes,
+                hash_to_gcfs,
+                taxonomy,
                 tax_level_idx,
                 max_mismatch,
-                args.min_qual,
+                min_qual,
                 &mut stats,
                 &mut pileup,
                 &mut gcf_counts,
@@ -218,28 +341,28 @@ mod classify {
 
         if let Some(enc) = iibsp_encoder {
             enc.finish()?;
-            if args.output_iibsp {
-                tracing::info!("Wrote {}", iibsp_path.display());
+            if output_iibsp {
+                tracing::info!("[{}] Wrote {}", sample_name, iibsp_path.display());
             }
         }
 
         // Host genotype outputs.
-        let vcf_path = args.output_dir.join("genotypes.vcf");
-        write_vcf(&vcf_path, &host_db.loci, &pileup, args.min_depth)?;
-        tracing::info!("Wrote {}", vcf_path.display());
+        let vcf_path = output_dir.join("genotypes.vcf");
+        write_vcf(&vcf_path, &host_db.loci, &pileup, min_depth)?;
+        tracing::info!("[{}] Wrote {}", sample_name, vcf_path.display());
 
-        let bimbam_path = args.output_dir.join("dosages.bimbam");
-        write_bimbam(&bimbam_path, &host_db.loci, &pileup, args.min_depth)?;
-        tracing::info!("Wrote {}", bimbam_path.display());
+        let bimbam_path = output_dir.join("dosages.bimbam");
+        write_bimbam(&bimbam_path, &host_db.loci, &pileup, min_depth)?;
+        tracing::info!("[{}] Wrote {}", sample_name, bimbam_path.display());
 
         // Microbial count outputs.
         if !gcf_counts.is_empty() {
-            let gcf_path = args.output_dir.join("gcf_counts.tsv");
+            let gcf_path = output_dir.join("gcf_counts.tsv");
             write_count_table(&gcf_path, "gcf", &gcf_counts)?;
         }
         if !taxon_counts.is_empty() {
-            let tax_path = args.output_dir.join(format!("{}_counts.tsv", args.taxonomy_level));
-            write_count_table(&tax_path, &args.taxonomy_level, &taxon_counts)?;
+            let tax_path = output_dir.join(format!("{}_counts.tsv", taxonomy_level));
+            write_count_table(&tax_path, taxonomy_level, &taxon_counts)?;
         }
 
         // Classification summary.
@@ -250,16 +373,12 @@ mod classify {
             0.0
         };
 
-        tracing::info!("Classified fragments: host_only={}, microbe_only={}, both={}, neither={}",
-            stats.host_only, stats.microbe_only, stats.both, stats.neither);
-        tracing::info!("Host fraction (of classified fragments): {:.4}", host_fraction);
-
-        let out_path = args.output_dir.join("holo_classify.tsv");
+        let out_path = output_dir.join("holo_classify.tsv");
         let file = File::create(&out_path)
             .with_context(|| format!("Failed to create output: {}", out_path.display()))?;
         let mut writer = BufWriter::new(file);
         writeln!(writer, "metric\tvalue")?;
-        writeln!(writer, "sample\t{}", args.sample_name)?;
+        writeln!(writer, "sample\t{}", sample_name)?;
         writeln!(writer, "input_fragments\t{}", stats.fragments)?;
         writeln!(writer, "host_only\t{}", stats.host_only)?;
         writeln!(writer, "microbe_only\t{}", stats.microbe_only)?;
@@ -268,7 +387,7 @@ mod classify {
         writeln!(writer, "host_fraction\t{:.6}", host_fraction)?;
         writeln!(writer, "microbial_hashes_observed\t{}", stats.microbe_hashes_observed)?;
         writer.flush()?;
-        tracing::info!("Wrote {}", out_path.display());
+        tracing::info!("[{}] Wrote {}", sample_name, out_path.display());
 
         Ok(())
     }
