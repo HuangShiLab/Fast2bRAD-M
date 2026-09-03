@@ -171,11 +171,12 @@ pub fn run(args: GenotypeArgs) -> Result<()> {
 
     let mut pileup = Pileup::new(db.loci.len(), db.loci[0].canonical.len());
 
-    // Process R1.
-    process_file(&args.r1, enzyme, &db, max_mismatch, args.min_qual, &mut pileup)?;
-    // Process R2 if present.
+    // Process reads. For paired-end input, process mates in lockstep so a tag
+    // observed on both R1 and R2 is counted once per fragment, not twice.
     if let Some(r2) = &args.r2 {
-        process_file(r2, enzyme, &db, max_mismatch, args.min_qual, &mut pileup)?;
+        process_paired(&args.r1, r2, enzyme, &db, max_mismatch, args.min_qual, &mut pileup)?;
+    } else {
+        process_file(&args.r1, enzyme, &db, max_mismatch, args.min_qual, &mut pileup)?;
     }
 
     tracing::info!(
@@ -226,6 +227,52 @@ fn load_host_db(path: &PathBuf) -> Result<HostDb> {
     Ok(HostDb { loci, index: HostTagIndex::new(&[], 2) })
 }
 
+/// One tag-to-locus assignment from a single read.
+#[derive(Debug, Clone)]
+struct ReadMatch {
+    locus_idx: usize,
+    dist: usize,
+    tag_seq: Vec<u8>,
+    qual: Vec<u8>,
+    same_strand: bool,
+}
+
+fn extract_matches(
+    seq_bytes: &[u8],
+    qual: Option<&[u8]>,
+    enzyme: &f2brad_core::enzymes::Enzyme,
+    db: &HostDb,
+    max_mismatch: usize,
+) -> Vec<ReadMatch> {
+    let mut matches = Vec::new();
+    let tags = enzyme.find_all_tags(seq_bytes);
+    for (offset, len) in tags {
+        let tag_seq = &seq_bytes[offset..offset + len];
+        let canonical = canonicalize(tag_seq);
+        if let Some((idx, dist)) = db.index.find(&canonical, max_mismatch) {
+            let locus = &db.loci[idx];
+            let ref_tag = &locus.seq;
+            let ref_rc = reverse_complement(ref_tag);
+            // Determine orientation from the raw read tag, not the canonical form.
+            let same_strand = hamming_distance(tag_seq, ref_tag) <= hamming_distance(tag_seq, &ref_rc);
+            let qual_window = qual.map(|q| q[offset..offset + len].to_vec()).unwrap_or_default();
+            matches.push(ReadMatch {
+                locus_idx: idx,
+                dist,
+                tag_seq: tag_seq.to_vec(),
+                qual: qual_window,
+                same_strand,
+            });
+        }
+    }
+    matches
+}
+
+fn add_match_to_pileup(m: &ReadMatch, min_qual: u8, db: &HostDb, pileup: &mut Pileup) {
+    let locus = &db.loci[m.locus_idx];
+    pileup.add_read(&locus.seq, &m.tag_seq, &m.qual, m.same_strand, min_qual, m.locus_idx, m.dist);
+}
+
 fn process_file(
     path: &PathBuf,
     enzyme: &f2brad_core::enzymes::Enzyme,
@@ -242,23 +289,73 @@ fn process_file(
         let seq = record.seq();
         let seq_bytes = seq.as_ref();
         let qual = record.qual();
-
-        let tags = enzyme.find_all_tags(seq_bytes);
-        for (offset, len) in tags {
-            let tag_seq = &seq_bytes[offset..offset + len];
-            let canonical = canonicalize(tag_seq);
-            if let Some((idx, dist)) = db.index.find(&canonical, max_mismatch) {
-                let locus = &db.loci[idx];
-                let ref_tag = &locus.seq;
-                let ref_rc = reverse_complement(ref_tag);
-                // Determine orientation from the raw read tag, not the canonical form.
-                let same_strand = hamming_distance(tag_seq, ref_tag) <= hamming_distance(tag_seq, &ref_rc);
-                let qual_window = qual.map(|q| &q[offset..offset + len]).unwrap_or(&[]);
-                pileup.add_read(ref_tag, tag_seq, qual_window, same_strand, min_qual, idx, dist);
-            }
+        for m in extract_matches(seq_bytes, qual, enzyme, db, max_mismatch) {
+            add_match_to_pileup(&m, min_qual, db, pileup);
         }
     }
 
+    Ok(())
+}
+
+fn process_paired(
+    path1: &PathBuf,
+    path2: &PathBuf,
+    enzyme: &f2brad_core::enzymes::Enzyme,
+    db: &HostDb,
+    max_mismatch: usize,
+    min_qual: u8,
+    pileup: &mut Pileup,
+) -> Result<()> {
+    let mut reader1 = parse_fastx_file(path1)
+        .with_context(|| format!("Failed to open reads: {}", path1.display()))?;
+    let mut reader2 = parse_fastx_file(path2)
+        .with_context(|| format!("Failed to open reads: {}", path2.display()))?;
+
+    let mut n_pairs = 0usize;
+    loop {
+        let rec1 = reader1.next();
+        let rec2 = reader2.next();
+        match (rec1, rec2) {
+            (None, None) => break,
+            (Some(r1), Some(r2)) => {
+                let r1 = r1.with_context(|| format!("Failed to read record from {}", path1.display()))?;
+                let r2 = r2.with_context(|| format!("Failed to read record from {}", path2.display()))?;
+                let seq1 = r1.seq();
+                let qual1 = r1.qual();
+                let seq2 = r2.seq();
+                let qual2 = r2.qual();
+
+                let matches1 = extract_matches(seq1.as_ref(), qual1, enzyme, db, max_mismatch);
+                let matches2 = extract_matches(seq2.as_ref(), qual2, enzyme, db, max_mismatch);
+
+                // Merge matches by locus, keeping the observation with the
+                // fewest mismatches. This prevents a tag seen on both mates of
+                // the same fragment from being counted twice.
+                let mut merged: HashMap<usize, ReadMatch> = HashMap::new();
+                for m in matches1.into_iter().chain(matches2.into_iter()) {
+                    merged
+                        .entry(m.locus_idx)
+                        .and_modify(|existing| {
+                            if m.dist < existing.dist {
+                                *existing = m.clone();
+                            }
+                        })
+                        .or_insert(m);
+                }
+                for m in merged.values() {
+                    add_match_to_pileup(m, min_qual, db, pileup);
+                }
+                n_pairs += 1;
+            }
+            _ => bail!(
+                "Paired input files have different numbers of reads: {} vs {}",
+                path1.display(),
+                path2.display()
+            ),
+        }
+    }
+
+    tracing::info!("Processed {} paired-end fragments", n_pairs);
     Ok(())
 }
 
