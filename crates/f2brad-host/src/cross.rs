@@ -54,6 +54,13 @@ struct CollisionRecord {
     microbe_canonical: Vec<u8>,
 }
 
+#[derive(Debug, Default, Clone)]
+struct GenomeResult {
+    total_tags: usize,
+    unique_tags: HashSet<Vec<u8>>,
+    collisions: Vec<CollisionRecord>,
+}
+
 pub fn run(args: CrossArgs) -> Result<()> {
     let _ = rayon::ThreadPoolBuilder::new().num_threads(args.threads).build_global();
 
@@ -78,7 +85,8 @@ pub fn run(args: CrossArgs) -> Result<()> {
     let genomes = read_genome_list(&args.genome_list)?;
     tracing::info!("Loaded {} genome entries", genomes.len());
 
-    // Process genomes in parallel. Each thread collects collisions for its subset.
+    // Process genomes in parallel. Each thread accumulates tags, collisions, and
+    // per-genome unique tag sets; the reduce step merges them into global totals.
     let pb = indicatif::ProgressBar::new(genomes.len() as u64)
         .with_style(
             ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({per_sec}) {msg}")
@@ -86,37 +94,49 @@ pub fn run(args: CrossArgs) -> Result<()> {
                 .progress_chars("#>-"),
         );
     pb.set_message("microbial genomes");
-    let results: Vec<Vec<CollisionRecord>> = genomes
+    let merged: GenomeResult = genomes
         .par_iter()
         .progress_with(pb)
-        .map(|(species, path)| {
-            process_microbial_genome(species, path, &index, max_mismatch, enzyme)
-        })
-        .collect();
+        .fold(
+            GenomeResult::default,
+            |mut acc, (species, path)| {
+                process_microbial_genome(species, path, &index, max_mismatch, enzyme, &mut acc);
+                acc
+            },
+        )
+        .reduce(
+            GenomeResult::default,
+            |mut a, b| {
+                a.total_tags += b.total_tags;
+                a.unique_tags.extend(b.unique_tags);
+                a.collisions.extend(b.collisions);
+                a
+            },
+        );
 
     // Aggregate collisions.
     let mut species_counts: HashMap<String, [usize; 4]> = HashMap::new();
     let mut human_mask: HashSet<Hash> = HashSet::new();
+    let mut microbe_mask: HashSet<Vec<u8>> = HashSet::new();
     let collisions_path = args.output_dir.join(format!("collisions.{}.{}.tsv", enzyme.name, max_mismatch));
     {
         let file = File::create(&collisions_path)
             .with_context(|| format!("Failed to create collisions file: {}", collisions_path.display()))?;
         let mut writer = BufWriter::new(file);
         writeln!(writer, "human_hash\tspecies\tdistance\tmicrobe_canonical")?;
-        for records in &results {
-            for rec in records {
-                human_mask.insert(rec.human_hash);
-                let counts = species_counts.entry(rec.species.clone()).or_default();
-                counts[rec.distance] += 1;
-                writeln!(
-                    writer,
-                    "{:016x}\t{}\t{}\t{}",
-                    rec.human_hash,
-                    rec.species,
-                    rec.distance,
-                    String::from_utf8_lossy(&rec.microbe_canonical)
-                )?;
-            }
+        for rec in &merged.collisions {
+            human_mask.insert(rec.human_hash);
+            microbe_mask.insert(rec.microbe_canonical.clone());
+            let counts = species_counts.entry(rec.species.clone()).or_default();
+            counts[rec.distance] += 1;
+            writeln!(
+                writer,
+                "{:016x}\t{}\t{}\t{}",
+                rec.human_hash,
+                rec.species,
+                rec.distance,
+                String::from_utf8_lossy(&rec.microbe_canonical)
+            )?;
         }
     }
 
@@ -143,26 +163,65 @@ pub fn run(args: CrossArgs) -> Result<()> {
     }
 
     // Write human masking list.
-    let mask_path = args.output_dir.join(format!("human_mask.{}.{}.txt", enzyme.name, max_mismatch));
+    let human_mask_path = args.output_dir.join(format!("human_mask.{}.{}.txt", enzyme.name, max_mismatch));
     {
-        let file = File::create(&mask_path)
-            .with_context(|| format!("Failed to create mask file: {}", mask_path.display()))?;
+        let file = File::create(&human_mask_path)
+            .with_context(|| format!("Failed to create human mask file: {}", human_mask_path.display()))?;
         let mut writer = BufWriter::new(file);
         for hash in &human_mask {
             writeln!(writer, "{:016x}", hash)?;
         }
     }
 
+    // Write microbial masking list (tags that should be excluded from the
+    // microbial database because they are indistinguishable from human tags).
+    let microbe_mask_path = args.output_dir.join(format!("microbe_mask.{}.{}.txt", enzyme.name, max_mismatch));
+    {
+        let file = File::create(&microbe_mask_path)
+            .with_context(|| format!("Failed to create microbe mask file: {}", microbe_mask_path.display()))?;
+        let mut writer = BufWriter::new(file);
+        for canonical in &microbe_mask {
+            writeln!(writer, "{}", String::from_utf8_lossy(canonical))?;
+        }
+    }
+
+    // Write cross summary.
+    let cross_summary_path = args.output_dir.join(format!("cross_summary.{}.{}.txt", enzyme.name, max_mismatch));
+    {
+        let file = File::create(&cross_summary_path)
+            .with_context(|| format!("Failed to create cross summary file: {}", cross_summary_path.display()))?;
+        let mut writer = BufWriter::new(file);
+        writeln!(writer, "total_microbial_tags\t{}", merged.total_tags)?;
+        writeln!(writer, "unique_microbial_tags\t{}", merged.unique_tags.len())?;
+        writeln!(writer, "unique_human_tags_masked\t{}", human_mask.len())?;
+        writeln!(writer, "unique_microbial_tags_masked\t{}", microbe_mask.len())?;
+        let microbe_mask_fraction = if merged.unique_tags.is_empty() {
+            0.0
+        } else {
+            microbe_mask.len() as f64 / merged.unique_tags.len() as f64
+        };
+        writeln!(writer, "microbial_mask_fraction\t{:.6}", microbe_mask_fraction)?;
+    }
+
     tracing::info!(
-        "Found {} colliding human tags across {} species",
+        "Genomes: {} | total microbial tags: {} | unique microbial tags: {}",
+        genomes.len(),
+        merged.total_tags,
+        merged.unique_tags.len()
+    );
+    tracing::info!(
+        "Found {} colliding human tags and {} colliding microbial tags across {} species",
         human_mask.len(),
+        microbe_mask.len(),
         species_counts.len()
     );
     tracing::info!(
-        "Wrote {}, {}, {}",
+        "Wrote {}, {}, {}, {}, {}",
         collisions_path.display(),
         summary_path.display(),
-        mask_path.display()
+        human_mask_path.display(),
+        microbe_mask_path.display(),
+        cross_summary_path.display()
     );
 
     Ok(())
@@ -217,13 +276,13 @@ fn process_microbial_genome(
     index: &HumanTagIndex,
     max_mismatch: usize,
     enzyme: &f2brad_core::enzymes::Enzyme,
-) -> Vec<CollisionRecord> {
-    let mut collisions = Vec::new();
+    out: &mut GenomeResult,
+) {
     let mut reader = match parse_fastx_file(path) {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("Failed to open {}: {}", path.display(), e);
-            return collisions;
+            return;
         }
     };
 
@@ -241,8 +300,10 @@ fn process_microbial_genome(
         for (offset, len) in tags {
             let tag_seq = &seq_bytes[offset..offset + len];
             let canonical = canonicalize(tag_seq);
+            out.total_tags += 1;
+            out.unique_tags.insert(canonical.clone());
             if let Some((distance, human_hash)) = index.find_collision(&canonical, max_mismatch) {
-                collisions.push(CollisionRecord {
+                out.collisions.push(CollisionRecord {
                     species: species.to_string(),
                     distance,
                     human_hash,
@@ -251,7 +312,6 @@ fn process_microbial_genome(
             }
         }
     }
-    collisions
 }
 
 fn canonicalize(seq: &[u8]) -> Vec<u8> {
