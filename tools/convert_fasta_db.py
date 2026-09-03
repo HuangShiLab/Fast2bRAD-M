@@ -135,19 +135,26 @@ def convert_fasta_to_iibdb(
     output_path: Path,
     enzyme: str,
     expected_length: Optional[int] = None,
+    stream: bool = False,
 ):
-    sys.stderr.write(f"Parsing {input_path} ...\n")
+    """Convert pre-digested tag FASTA to compact .iibdb v3.
+
+    Two modes:
+      - stream=False (default): loads tags into memory and performs global
+        canonical-hash deduplication. Suitable for smaller reference DBs.
+      - stream=True: single-pass streaming conversion. Memory footprint is
+        tiny (~GCF table only). Use this for very large DBs such as
+        BcgI.species.fa.gz. Assumes the input has already been deduplicated
+        by the upstream 2bRAD-M pipeline; duplicate hashes are written as-is
+        and counted in the stats.
+    """
+    import zstandard as zstd  # local import so hash-only imports work without it
+
+    sys.stderr.write(f"Parsing {input_path} (stream={stream}) ...\n")
 
     # First pass: collect GCF IDs in order of first appearance
     gcf_order: List[str] = []
     gcf_to_idx: Dict[str, int] = {}
-    gcf_tag_counts: Dict[str, int] = defaultdict(int)
-
-    # Also collect per-GCF tag sequences to compute hashes in memory.
-    # For very large DBs this could be streamed twice; BcgI.species.fa.gz is ~14G,
-    # so two passes are acceptable and simpler than external sort.
-    per_gcf_tags: Dict[str, List[bytes]] = defaultdict(list)
-
     total_records = 0
     length_issues = 0
 
@@ -159,29 +166,20 @@ def convert_fasta_to_iibdb(
         if gcf_id not in gcf_to_idx:
             gcf_to_idx[gcf_id] = len(gcf_order)
             gcf_order.append(gcf_id)
-        per_gcf_tags[gcf_id].append(seq)
-        gcf_tag_counts[gcf_id] += 1
 
-        if total_records % 5_000_000 == 0:
+        if total_records % 10_000_000 == 0:
             sys.stderr.write(f"  {total_records:,} records parsed\n")
 
     sys.stderr.write(
-        f"Done. {total_records:,} records, {len(gcf_order)} genomes, "
+        f"Done first pass. {total_records:,} records, {len(gcf_order)} genomes, "
         f"length_issues={length_issues}\n"
     )
 
-    # Compute canonical hashes and deduplicate globally:
-    # If the same canonical hash maps to multiple GCFs, keep the first occurrence
-    # (original 2bRAD-M pipeline should have already removed cross-species shared tags,
-    #  so collisions should be rare).
-    hash_to_gcf: Dict[int, int] = {}
-    collisions = 0
-    records_written = 0
-
-    sys.stderr.write("Computing hashes and writing compact database ...\n")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    import zstandard as zstd  # local import so hash-only imports work without it
+    records_written = 0
+    collisions = 0
+    duplicates = 0
 
     with open(output_path, "wb") as fh:
         # Header (uncompressed)
@@ -198,19 +196,45 @@ def convert_fasta_to_iibdb(
 
         # Records (zstd compressed)
         compressor = zstd.ZstdCompressor(level=3)
-        with compressor.stream_writer(fh, closefd=False) as writer:
-            for gcf_id in gcf_order:
-                idx = gcf_to_idx[gcf_id]
-                for seq in per_gcf_tags[gcf_id]:
+        sys.stderr.write("Computing hashes and writing compact database ...\n")
+
+        if stream:
+            with compressor.stream_writer(fh, closefd=False) as writer:
+                for header, seq in parse_fasta_records(input_path):
+                    gcf_id = extract_gcf_id(header)
+                    idx = gcf_to_idx[gcf_id]
                     h = canonical_hash(seq)
-                    existing = hash_to_gcf.get(h)
-                    if existing is None:
-                        hash_to_gcf[h] = idx
-                        writer.write(struct.pack("<Q", h))
-                        writer.write(struct.pack("<I", idx))
-                        records_written += 1
-                    elif existing != idx:
-                        collisions += 1
+                    writer.write(struct.pack("<Q", h))
+                    writer.write(struct.pack("<I", idx))
+                    records_written += 1
+                    if records_written % 10_000_000 == 0:
+                        sys.stderr.write(f"  {records_written:,} records written\n")
+        else:
+            # In-memory deduplication mode
+            per_gcf_tags: Dict[str, List[bytes]] = defaultdict(list)
+            for header, seq in parse_fasta_records(input_path):
+                gcf_id = extract_gcf_id(header)
+                per_gcf_tags[gcf_id].append(seq)
+
+            hash_to_gcf: Dict[int, int] = {}
+            with compressor.stream_writer(fh, closefd=False) as writer:
+                for gcf_id in gcf_order:
+                    idx = gcf_to_idx[gcf_id]
+                    seen_hashes: set = set()
+                    for seq in per_gcf_tags[gcf_id]:
+                        h = canonical_hash(seq)
+                        if h in seen_hashes:
+                            duplicates += 1
+                            continue
+                        seen_hashes.add(h)
+                        existing = hash_to_gcf.get(h)
+                        if existing is None:
+                            hash_to_gcf[h] = idx
+                            writer.write(struct.pack("<Q", h))
+                            writer.write(struct.pack("<I", idx))
+                            records_written += 1
+                        elif existing != idx:
+                            collisions += 1
 
         # Patch record_count
         fh.seek(8)
@@ -220,14 +244,16 @@ def convert_fasta_to_iibdb(
     with open(stats_path, "w") as fh:
         fh.write(f"input_records\t{total_records}\n")
         fh.write(f"genomes\t{len(gcf_order)}\n")
-        fh.write(f"unique_hashes\t{records_written}\n")
+        fh.write(f"records_written\t{records_written}\n")
         fh.write(f"hash_collisions_across_gcf\t{collisions}\n")
+        fh.write(f"within_gcf_duplicates\t{duplicates}\n")
         fh.write(f"length_issues\t{length_issues}\n")
         fh.write(f"enzyme\t{enzyme}\n")
+        fh.write(f"stream_mode\t{stream}\n")
 
     sys.stderr.write(
-        f"Wrote {output_path}: {records_written:,} unique hashes, "
-        f"{collisions} cross-GCF collisions\n"
+        f"Wrote {output_path}: {records_written:,} records, "
+        f"{collisions} cross-GCF collisions, {duplicates} within-GCF duplicates\n"
     )
 
 
@@ -244,6 +270,12 @@ def main():
         default=None,
         help="Expected tag length; warn if mismatched",
     )
+    ap.add_argument(
+        "--stream",
+        action="store_true",
+        help="Single-pass streaming mode: low memory, no global dedup. "
+             "Recommended for very large DBs (e.g. BcgI.species.fa.gz).",
+    )
     args = ap.parse_args()
 
     convert_fasta_to_iibdb(
@@ -251,6 +283,7 @@ def main():
         Path(args.output),
         args.enzyme,
         args.expected_length,
+        stream=args.stream,
     )
 
 
