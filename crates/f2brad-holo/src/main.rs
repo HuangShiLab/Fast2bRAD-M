@@ -102,6 +102,13 @@ struct ClassifyArgs {
     #[arg(long = "output-iibsp", default_value = "true")]
     output_iibsp: bool,
 
+    /// Exclude GCFs whose taxonomy species is "human" from the microbial database.
+    /// Requires `--microbe-db-dir` and a taxonomy file. Use this in holo-RAD on
+    /// human samples where the microbial reference database also contains the host
+    /// genome as a "species".
+    #[arg(long = "exclude-human", default_value = "false")]
+    exclude_human: bool,
+
     /// Number of parallel threads
     #[arg(short = 'j', long = "threads", default_value = "4")]
     threads: usize,
@@ -136,8 +143,49 @@ mod classify {
         let host_db = Arc::new(load_host_db(&args.host_db, max_mismatch)?);
         tracing::info!("Loaded {} host tags", host_db.loci.len());
 
+        let tax_level_idx = taxonomy_level_index(&args.taxonomy_level)?;
+        let taxonomy: Option<HashMap<String, Vec<String>>> = if let Some(db_dir) = &args.microbe_db_dir {
+            let tax_path = db_dir.join("abfh_classify_with_speciename.txt.gz");
+            if tax_path.exists() {
+                Some(load_taxonomy(&tax_path)?)
+            } else {
+                tracing::warn!("Taxonomy file not found at {}; taxon counts disabled", tax_path.display());
+                None
+            }
+        } else {
+            None
+        };
+
+        let exclude_gcfs: HashSet<String> = if args.exclude_human {
+            match &taxonomy {
+                Some(tax) => {
+                    let species_idx = taxonomy_level_index("species")?;
+                    let human_gcfs: HashSet<String> = tax
+                        .iter()
+                        .filter(|(_, ranks)| {
+                            ranks.get(species_idx)
+                                .map(|s| s.eq_ignore_ascii_case("human"))
+                                .unwrap_or(false)
+                        })
+                        .map(|(gcf, _)| gcf.clone())
+                        .collect();
+                    tracing::info!(
+                        "Excluding {} human GCF(s) from microbial database",
+                        human_gcfs.len()
+                    );
+                    human_gcfs
+                }
+                None => {
+                    tracing::warn!("--exclude-human requires --microbe-db-dir with a taxonomy file; ignoring");
+                    HashSet::new()
+                }
+            }
+        } else {
+            HashSet::new()
+        };
+
         tracing::info!("Loading microbial DB from {}", args.microbe_db.display());
-        let (gcf_table, hash_to_gcfs) = load_microbe_db(&args.microbe_db)?;
+        let (gcf_table, hash_to_gcfs) = load_microbe_db(&args.microbe_db, &exclude_gcfs)?;
         tracing::info!(
             "Loaded {} unique microbial tag hashes ({} GCFs)",
             hash_to_gcfs.len(),
@@ -155,19 +203,6 @@ mod classify {
         let microbe_mask = Arc::new(microbe_mask);
         let gcf_table = Arc::new(gcf_table);
         let hash_to_gcfs = Arc::new(hash_to_gcfs);
-
-        let tax_level_idx = taxonomy_level_index(&args.taxonomy_level)?;
-        let taxonomy: Option<HashMap<String, Vec<String>>> = if let Some(db_dir) = &args.microbe_db_dir {
-            let tax_path = db_dir.join("abfh_classify_with_speciename.txt.gz");
-            if tax_path.exists() {
-                Some(load_taxonomy(&tax_path)?)
-            } else {
-                tracing::warn!("Taxonomy file not found at {}; taxon counts disabled", tax_path.display());
-                None
-            }
-        } else {
-            None
-        };
         let taxonomy = Arc::new(taxonomy);
 
         let samples = if let Some(list_path) = &args.sample_list {
@@ -423,11 +458,31 @@ mod classify {
     /// Load a microbial .iibdb compact database. Returns the GCF table and a map
     /// from tag hash to the GCF index/indices carrying that tag. Using `u32`
     /// indices instead of cloned strings keeps memory usage and load time low.
-    fn load_microbe_db(path: &PathBuf) -> Result<(Vec<String>, HashMap<Hash, Vec<u32>>)> {
+    /// Records whose GCF string is in `exclude_gcfs` are skipped.
+    fn load_microbe_db(
+        path: &PathBuf,
+        exclude_gcfs: &HashSet<String>,
+    ) -> Result<(Vec<String>, HashMap<Hash, Vec<u32>>)> {
         let mut reader = open_compact_reader(path)?;
         let gcf_table: Vec<String> = reader.gcf_table().to_vec();
+        let excluded_indices: HashSet<u32> = gcf_table
+            .iter()
+            .enumerate()
+            .filter(|(_, gcf)| exclude_gcfs.contains(*gcf))
+            .map(|(i, _)| i as u32)
+            .collect();
+        if !excluded_indices.is_empty() {
+            tracing::info!(
+                "Skipping {} excluded GCF(s) ({} requested)",
+                excluded_indices.len(),
+                exclude_gcfs.len()
+            );
+        }
         let mut hash_to_gcfs: HashMap<Hash, Vec<u32>> = HashMap::new();
         while let Some((hash, gcf_index)) = reader.next_record()? {
+            if excluded_indices.contains(&gcf_index) {
+                continue;
+            }
             hash_to_gcfs.entry(hash).or_default().push(gcf_index);
         }
         Ok((gcf_table, hash_to_gcfs))

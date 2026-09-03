@@ -31,6 +31,7 @@ echo "Running small-batch f2brad-holo classify for $(wc -l < "${SAMPLE_LIST}") s
     -m "${MICROBE_DB}" \
     --microbe-mask "${MICROBE_MASK}" \
     --microbe-db-dir "${MICROBE_DB_DIR}" \
+    --exclude-human \
     -l "${SAMPLE_LIST}" \
     -s "${ENZYME}" \
     -o "${OUTDIR}/holo" \
