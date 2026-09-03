@@ -2,7 +2,7 @@
 # Host-microbe interaction analysis for diurnal saliva pilot
 #
 # Required packages:
-#   install.packages(c("vegan", "lme4", "ggplot2", "dplyr", "tidyr", "readr"))
+#   install.packages(c("vegan", "lme4", "ggplot2", "dplyr", "tidyr", "readr", "tibble"))
 
 library(vegan)
 library(lme4)
@@ -10,6 +10,7 @@ library(ggplot2)
 library(dplyr)
 library(tidyr)
 library(readr)
+library(tibble)
 
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 2) {
