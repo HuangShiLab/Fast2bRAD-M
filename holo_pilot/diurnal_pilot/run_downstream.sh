@@ -8,11 +8,12 @@ set -euo pipefail
 
 # Activate the holo2bRAD Python venv and R conda env
 source /lustre1/g/aos_shihuang/holo2bRAD/.venv/bin/activate
-source /lustre1/g/aos_shihuang/holo2bRAD/.conda_env/bin/activate
+source /group/aos_shihuang/conda/etc/profile.d/conda.sh
+conda activate R
 
 SCRIPT_DIR="/lustre1/g/aos_shihuang/holo2bRAD/diurnal_pilot"
 METADATA="${SCRIPT_DIR}/metadata.tsv"
-HOLO_DIR="/lustre1/g/aos_shihuang/holo2bRAD/diurnal_pilot/holo"
+HOLO_DIR="/lustre1/g/aos_shihuang/holo2bRAD/diurnal_pilot/holo/holo"
 OUTDIR="/lustre1/g/aos_shihuang/holo2bRAD/diurnal_pilot/results"
 
 mkdir -p "${OUTDIR}"

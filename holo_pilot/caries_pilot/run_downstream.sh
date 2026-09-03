@@ -11,7 +11,7 @@ source /lustre1/g/aos_shihuang/holo2bRAD/.venv/bin/activate
 
 SCRIPT_DIR="/lustre1/g/aos_shihuang/holo2bRAD/caries_pilot"
 METADATA="${SCRIPT_DIR}/metadata.tsv"
-HOLO_DIR="/lustre1/g/aos_shihuang/holo2bRAD/caries_pilot/holo"
+HOLO_DIR="/lustre1/g/aos_shihuang/holo2bRAD/caries_pilot/holo/holo"
 OUTDIR="/lustre1/g/aos_shihuang/holo2bRAD/caries_pilot/results"
 
 mkdir -p "${OUTDIR}"
