@@ -1,5 +1,6 @@
 mod build_qual_db;
 mod build_quan_db;
+mod dedup_db;
 mod find_genome;
 mod inspect;
 mod merge;
@@ -36,6 +37,9 @@ enum Commands {
     BuildQualDb(build_qual_db::BuildQualDbArgs),
     /// Build quantitative database: output unique tags only
     BuildQuanDb(build_quan_db::BuildQuanDbArgs),
+    /// Convert a qualitative compact database to a quantitative one by keeping
+    /// only tags that map to a single GCF.
+    DedupDb(dedup_db::DedupDbArgs),
     /// Abundance quantification: compute the relative abundance of microbes in a sample
     Quantify(quantify::QuantifyArgs),
 
@@ -70,6 +74,7 @@ fn main() -> Result<()> {
         Commands::Extract(args) => f2brad_core::extract::run(args),
         Commands::BuildQualDb(args) => build_qual_db::run(args),
         Commands::BuildQuanDb(args) => build_quan_db::run(args),
+        Commands::DedupDb(args) => dedup_db::run(args),
         Commands::Quantify(args) => quantify::run(args),
         Commands::Merge(args) => merge::run(args),
         Commands::FindGenome(args) => find_genome::run(args),
