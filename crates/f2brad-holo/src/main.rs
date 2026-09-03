@@ -137,19 +137,23 @@ mod classify {
         tracing::info!("Loaded {} host tags", host_db.loci.len());
 
         tracing::info!("Loading microbial DB from {}", args.microbe_db.display());
-        let (microbe_hashes, hash_to_gcfs) = load_microbe_db(&args.microbe_db)?;
-        tracing::info!("Loaded {} microbial tag hashes", microbe_hashes.len());
+        let (gcf_table, hash_to_gcfs) = load_microbe_db(&args.microbe_db)?;
+        tracing::info!(
+            "Loaded {} unique microbial tag hashes ({} GCFs)",
+            hash_to_gcfs.len(),
+            gcf_table.len()
+        );
 
-        let microbe_hashes = if let Some(mask_path) = &args.microbe_mask {
+        let microbe_mask: Option<HashSet<Hash>> = if let Some(mask_path) = &args.microbe_mask {
             tracing::info!("Loading microbial mask from {}", mask_path.display());
             let mask = load_microbe_mask(mask_path)?;
             tracing::info!("Applying microbial mask: {} tag(s)", mask.len());
-            microbe_hashes.difference(&mask).copied().collect()
+            Some(mask)
         } else {
-            microbe_hashes
+            None
         };
-        tracing::info!("{} microbial hashes remain after masking", microbe_hashes.len());
-        let microbe_hashes = Arc::new(microbe_hashes);
+        let microbe_mask = Arc::new(microbe_mask);
+        let gcf_table = Arc::new(gcf_table);
         let hash_to_gcfs = Arc::new(hash_to_gcfs);
 
         let tax_level_idx = taxonomy_level_index(&args.taxonomy_level)?;
@@ -202,8 +206,9 @@ mod classify {
                     sample.r2.as_ref(),
                     enzyme,
                     &host_db,
-                    &microbe_hashes,
+                    &gcf_table,
                     &hash_to_gcfs,
+                    microbe_mask.as_ref().as_ref(),
                     taxonomy.as_ref().as_ref(),
                     tax_level_idx,
                     max_mismatch,
@@ -267,8 +272,9 @@ mod classify {
         r2: Option<&PathBuf>,
         enzyme: &Enzyme,
         host_db: &HostDb,
-        microbe_hashes: &HashSet<Hash>,
-        hash_to_gcfs: &HashMap<Hash, Vec<String>>,
+        gcf_table: &[String],
+        hash_to_gcfs: &HashMap<Hash, Vec<u32>>,
+        microbe_mask: Option<&HashSet<Hash>>,
         taxonomy: Option<&HashMap<String, Vec<String>>>,
         tax_level_idx: usize,
         max_mismatch: usize,
@@ -280,7 +286,7 @@ mod classify {
     ) -> Result<()> {
         let mut stats = ClassifyStats::default();
         let mut pileup = Pileup::new(host_db.loci.len(), host_db.loci[0].canonical.len());
-        let mut gcf_counts: HashMap<String, usize> = HashMap::new();
+        let mut gcf_counts: HashMap<u32, usize> = HashMap::new();
         let mut taxon_counts: HashMap<String, usize> = HashMap::new();
 
         let iibsp_path = output_dir.join(format!("{}.iibsp.gz", sample_name));
@@ -308,8 +314,9 @@ mod classify {
                 r2,
                 enzyme,
                 host_db,
-                microbe_hashes,
+                gcf_table,
                 hash_to_gcfs,
+                microbe_mask,
                 taxonomy,
                 tax_level_idx,
                 max_mismatch,
@@ -325,8 +332,9 @@ mod classify {
                 r1,
                 enzyme,
                 host_db,
-                microbe_hashes,
+                gcf_table,
                 hash_to_gcfs,
+                microbe_mask,
                 taxonomy,
                 tax_level_idx,
                 max_mismatch,
@@ -358,7 +366,17 @@ mod classify {
         // Microbial count outputs.
         if !gcf_counts.is_empty() {
             let gcf_path = output_dir.join("gcf_counts.tsv");
-            write_count_table(&gcf_path, "gcf", &gcf_counts)?;
+            let gcf_counts_str: HashMap<String, usize> = gcf_counts
+                .into_iter()
+                .map(|(idx, count)| {
+                    let name = gcf_table
+                        .get(idx as usize)
+                        .cloned()
+                        .unwrap_or_else(|| format!("gcf_index_{}", idx));
+                    (name, count)
+                })
+                .collect();
+            write_count_table(&gcf_path, "gcf", &gcf_counts_str)?;
         }
         if !taxon_counts.is_empty() {
             let tax_path = output_dir.join(format!("{}_counts.tsv", taxonomy_level));
@@ -402,22 +420,17 @@ mod classify {
         microbe_hashes_observed: usize,
     }
 
-    /// Load a microbial .iibdb compact database. Returns the set of all tag hashes
-    /// and a map from hash to the GCF id(s) carrying that tag.
-    fn load_microbe_db(path: &PathBuf) -> Result<(HashSet<Hash>, HashMap<Hash, Vec<String>>)> {
+    /// Load a microbial .iibdb compact database. Returns the GCF table and a map
+    /// from tag hash to the GCF index/indices carrying that tag. Using `u32`
+    /// indices instead of cloned strings keeps memory usage and load time low.
+    fn load_microbe_db(path: &PathBuf) -> Result<(Vec<String>, HashMap<Hash, Vec<u32>>)> {
         let mut reader = open_compact_reader(path)?;
         let gcf_table: Vec<String> = reader.gcf_table().to_vec();
-        let mut hashes = HashSet::new();
-        let mut hash_to_gcfs: HashMap<Hash, Vec<String>> = HashMap::new();
+        let mut hash_to_gcfs: HashMap<Hash, Vec<u32>> = HashMap::new();
         while let Some((hash, gcf_index)) = reader.next_record()? {
-            hashes.insert(hash);
-            let gcf_id = gcf_table
-                .get(gcf_index as usize)
-                .cloned()
-                .unwrap_or_else(|| format!("gcf_index_{}", gcf_index));
-            hash_to_gcfs.entry(hash).or_default().push(gcf_id);
+            hash_to_gcfs.entry(hash).or_default().push(gcf_index);
         }
-        Ok((hashes, hash_to_gcfs))
+        Ok((gcf_table, hash_to_gcfs))
     }
 
     /// Load a microbial mask file: one canonical sequence per line. Convert each
@@ -470,15 +483,16 @@ mod classify {
         path: &PathBuf,
         enzyme: &f2brad_core::enzymes::Enzyme,
         host_db: &HostDb,
-        microbe_hashes: &HashSet<Hash>,
-        hash_to_gcfs: &HashMap<Hash, Vec<String>>,
+        gcf_table: &[String],
+        hash_to_gcfs: &HashMap<Hash, Vec<u32>>,
+        microbe_mask: Option<&HashSet<Hash>>,
         taxonomy: Option<&HashMap<String, Vec<String>>>,
         tax_level_idx: usize,
         max_mismatch: usize,
         min_qual: u8,
         stats: &mut ClassifyStats,
         pileup: &mut Pileup,
-        gcf_counts: &mut HashMap<String, usize>,
+        gcf_counts: &mut HashMap<u32, usize>,
         taxon_counts: &mut HashMap<String, usize>,
         iibsp: &mut dyn Write,
     ) -> Result<()> {
@@ -492,9 +506,9 @@ mod classify {
             let qual = record.qual();
             fragment_hashes.clear();
             let fragment_tags = classify_fragment(
-                seq.as_ref(), qual, enzyme, host_db, microbe_hashes, hash_to_gcfs,
-                taxonomy, tax_level_idx, max_mismatch, min_qual, pileup, gcf_counts,
-                taxon_counts, &mut fragment_hashes,
+                seq.as_ref(), qual, enzyme, host_db, gcf_table, hash_to_gcfs,
+                microbe_mask, taxonomy, tax_level_idx, max_mismatch, min_qual, pileup,
+                gcf_counts, taxon_counts, &mut fragment_hashes,
             )?;
             for hash in &fragment_hashes {
                 iibsp.write_all(&hash.to_le_bytes())?;
@@ -512,15 +526,16 @@ mod classify {
         path2: &PathBuf,
         enzyme: &f2brad_core::enzymes::Enzyme,
         host_db: &HostDb,
-        microbe_hashes: &HashSet<Hash>,
-        hash_to_gcfs: &HashMap<Hash, Vec<String>>,
+        gcf_table: &[String],
+        hash_to_gcfs: &HashMap<Hash, Vec<u32>>,
+        microbe_mask: Option<&HashSet<Hash>>,
         taxonomy: Option<&HashMap<String, Vec<String>>>,
         tax_level_idx: usize,
         max_mismatch: usize,
         min_qual: u8,
         stats: &mut ClassifyStats,
         pileup: &mut Pileup,
-        gcf_counts: &mut HashMap<String, usize>,
+        gcf_counts: &mut HashMap<u32, usize>,
         taxon_counts: &mut HashMap<String, usize>,
         iibsp: &mut dyn Write,
     ) -> Result<()> {
@@ -542,14 +557,14 @@ mod classify {
 
                     fragment_hashes.clear();
                     let t1 = classify_fragment(
-                        r1.seq().as_ref(), r1.qual(), enzyme, host_db, microbe_hashes,
-                        hash_to_gcfs, taxonomy, tax_level_idx, max_mismatch, min_qual, pileup,
-                        gcf_counts, taxon_counts, &mut fragment_hashes,
+                        r1.seq().as_ref(), r1.qual(), enzyme, host_db, gcf_table,
+                        hash_to_gcfs, microbe_mask, taxonomy, tax_level_idx, max_mismatch,
+                        min_qual, pileup, gcf_counts, taxon_counts, &mut fragment_hashes,
                     )?;
                     let t2 = classify_fragment(
-                        r2.seq().as_ref(), r2.qual(), enzyme, host_db, microbe_hashes,
-                        hash_to_gcfs, taxonomy, tax_level_idx, max_mismatch, min_qual, pileup,
-                        gcf_counts, taxon_counts, &mut fragment_hashes,
+                        r2.seq().as_ref(), r2.qual(), enzyme, host_db, gcf_table,
+                        hash_to_gcfs, microbe_mask, taxonomy, tax_level_idx, max_mismatch,
+                        min_qual, pileup, gcf_counts, taxon_counts, &mut fragment_hashes,
                     )?;
                     for hash in &fragment_hashes {
                         iibsp.write_all(&hash.to_le_bytes())?;
@@ -582,14 +597,15 @@ mod classify {
         qual: Option<&[u8]>,
         enzyme: &f2brad_core::enzymes::Enzyme,
         host_db: &HostDb,
-        microbe_hashes: &HashSet<Hash>,
-        hash_to_gcfs: &HashMap<Hash, Vec<String>>,
+        gcf_table: &[String],
+        hash_to_gcfs: &HashMap<Hash, Vec<u32>>,
+        microbe_mask: Option<&HashSet<Hash>>,
         taxonomy: Option<&HashMap<String, Vec<String>>>,
         tax_level_idx: usize,
         max_mismatch: usize,
         min_qual: u8,
         pileup: &mut Pileup,
-        gcf_counts: &mut HashMap<String, usize>,
+        gcf_counts: &mut HashMap<u32, usize>,
         taxon_counts: &mut HashMap<String, usize>,
         fragment_hashes: &mut HashSet<Hash>,
     ) -> Result<FragmentTags> {
@@ -624,12 +640,19 @@ mod classify {
             let tag_seq = &seq[offset..offset + len];
             let canonical = canonicalize(tag_seq);
             let hash = canonical_hash(&canonical);
-            if microbe_hashes.contains(&hash) && fragment_hashes.insert(hash) {
-                is_microbe = true;
-                if let Some(gcfs) = hash_to_gcfs.get(&hash) {
-                    for gcf in gcfs {
-                        *gcf_counts.entry(gcf.clone()).or_insert(0) += 1;
+            if microbe_mask.map_or(false, |m| m.contains(&hash)) {
+                continue;
+            }
+            if let Some(gcfs) = hash_to_gcfs.get(&hash) {
+                if fragment_hashes.insert(hash) {
+                    is_microbe = true;
+                    for &gcf_idx in gcfs {
+                        *gcf_counts.entry(gcf_idx).or_insert(0) += 1;
                         if let Some(tax) = taxonomy {
+                            let gcf = gcf_table
+                                .get(gcf_idx as usize)
+                                .map(|s| s.as_str())
+                                .unwrap_or("");
                             if let Some(ranks) = tax.get(gcf) {
                                 if let Some(rank_name) = ranks.get(tax_level_idx) {
                                     *taxon_counts.entry(rank_name.clone()).or_insert(0) += 1;
