@@ -45,10 +45,12 @@ host <- as.data.frame(lapply(host, function(x) {
 
 # Host-genotype PCs for candidate SNPs
 snp_cols <- setdiff(colnames(host), "host_fraction")
-if (length(snp_cols) > 1) {
+# Drop monomorphic SNPs before PCA
+snp_cols <- snp_cols[sapply(host[, snp_cols, drop = FALSE], function(x) stats::sd(x, na.rm = TRUE) > 0)]
+if (length(snp_cols) >= 1) {
   host_pca <- prcomp(host[, snp_cols, drop = FALSE], scale. = TRUE)
   host$host_geno_PC1 <- host_pca$x[, 1]
-  host$host_geno_PC2 <- host_pca$x[, 2]
+  host$host_geno_PC2 <- if (ncol(host_pca$x) >= 2) host_pca$x[, 2] else 0
 } else {
   host$host_geno_PC1 <- 0
   host$host_geno_PC2 <- 0
