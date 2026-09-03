@@ -15,7 +15,7 @@ THREADS="${4:-16}"
 # ----- HPC PATHS -----
 F2BRAD_HOLO="/lustre1/g/aos_shihuang/Fast2bRAD-M/target/release/f2brad-holo"
 HOST_DB="/lustre1/g/aos_shihuang/holo2bRAD/host_db/${ENZYME}.host_db.tsv"
-MICROBE_DB="/lustre1/g/aos_shihuang/Fast2bRAD-M/db/02_db_qual/${ENZYME}.species.iibdb"
+MICROBE_DB="/lustre1/g/aos_shihuang/Fast2bRAD-M/db/02_db_qual/${ENZYME}.species.quant.iibdb"
 MICROBE_MASK="/lustre1/g/aos_shihuang/holo2bRAD/cross_results/${ENZYME}/microbe_mask.${ENZYME}.2.txt"
 MICROBE_DB_DIR="/lustre1/g/aos_shihuang/Fast2bRAD-M/db/02_db_qual"
 
