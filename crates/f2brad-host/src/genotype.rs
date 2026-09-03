@@ -189,6 +189,11 @@ pub fn run(args: GenotypeArgs) -> Result<()> {
     write_vcf(&vcf_path, &db.loci, &pileup, args.min_depth)?;
     tracing::info!("Wrote {}", vcf_path.display());
 
+    // Write GEMMA BIMBAM mean-genotype file.
+    let bimbam_path = args.output_dir.join("dosages.bimbam");
+    write_bimbam(&bimbam_path, &db.loci, &pileup, args.min_depth)?;
+    tracing::info!("Wrote {}", bimbam_path.display());
+
     Ok(())
 }
 
@@ -570,6 +575,77 @@ fn write_vcf(
 
     writer.flush()?;
     Ok(())
+}
+
+/// Write a GEMMA BIMBAM-format mean-genotype file.
+/// Columns: SNP_id A1_allele A2_allele dosage
+fn write_bimbam(
+    path: &PathBuf,
+    loci: &[Locus],
+    pileup: &Pileup,
+    min_depth: usize,
+) -> Result<()> {
+    let file = File::create(path)
+        .with_context(|| format!("Failed to create BIMBAM file: {}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+
+    for (locus_idx, locus) in loci.iter().enumerate() {
+        for (tag_pos, &depth) in pileup.depth[locus_idx].iter().enumerate() {
+            if depth < min_depth {
+                continue;
+            }
+            let ref_base = locus.seq[tag_pos];
+            let ref_idx = BASE_TO_IDX[ref_base as usize];
+            if ref_idx > 3 {
+                continue;
+            }
+            let counts = pileup.counts[locus_idx][tag_pos];
+
+            // Pick the strongest non-REF allele as A2.
+            let mut alt_idx = None;
+            let mut alt_count = 0usize;
+            for i in 0..4 {
+                if i == ref_idx {
+                    continue;
+                }
+                if counts[i] > alt_count {
+                    alt_count = counts[i];
+                    alt_idx = Some(i);
+                }
+            }
+            let alt_base = alt_idx.map(|i| IDX_TO_BASE[i]).unwrap_or(b'.');
+
+            let gl = genotype_likelihoods(ref_base, alt_base, &counts, &pileup.qual_sums[locus_idx][tag_pos]);
+            let dosage = genotype_dosage(&gl);
+
+            let snp_id = format!("{}_{}", locus.contig, locus.pos + tag_pos + 1);
+            writeln!(
+                writer,
+                "{}\t{}\t{}\t{:.4}",
+                snp_id,
+                ref_base as char,
+                alt_base as char,
+                dosage
+            )?;
+        }
+    }
+
+    writer.flush()?;
+    Ok(())
+}
+
+/// Compute expected dosage = P(het) + 2*P(hom-alt) from log10 likelihoods.
+fn genotype_dosage(gl: &[f64; 3]) -> f64 {
+    // Convert log10 likelihoods to probabilities.
+    let p: Vec<f64> = gl.iter().map(|&x| 10f64.powf(x)).collect();
+    let sum: f64 = p.iter().sum();
+    if sum == 0.0 {
+        return 0.0;
+    }
+    let _p0 = p[0] / sum;
+    let p1 = p[1] / sum;
+    let p2 = p[2] / sum;
+    p1 + 2.0 * p2
 }
 
 /// Compute log10 genotype likelihoods for genotypes 0/0, 0/1, 1/1.
