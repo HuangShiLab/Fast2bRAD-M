@@ -415,6 +415,7 @@ dependencies = [
  "anyhow",
  "clap 4.6.1",
  "f2brad-core",
+ "flate2",
  "fxhash",
  "indicatif",
  "needletail",

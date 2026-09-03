@@ -14,6 +14,8 @@ enum Commands {
     Digest(f2brad_host::digest::DigestArgs),
     /// Cross-assignment collision analysis: human tags vs microbial genomes.
     Cross(f2brad_host::cross::CrossArgs),
+    /// Build a host tag database from digest output and an optional cross-mask.
+    BuildDb(f2brad_host::build_db::BuildDbArgs),
 }
 
 fn main() -> Result<()> {
@@ -22,5 +24,6 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Digest(args) => f2brad_host::digest::run(args),
         Commands::Cross(args) => f2brad_host::cross::run(args),
+        Commands::BuildDb(args) => f2brad_host::build_db::run(args),
     }
 }
