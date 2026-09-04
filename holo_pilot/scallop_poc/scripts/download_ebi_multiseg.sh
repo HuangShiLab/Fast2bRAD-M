@@ -27,10 +27,10 @@ download_seg() {
         END=""
     fi
     local PART="$PARTDIR/seg_$i"
-    local EXPECTED=$(( (i == SEGS - 1) ? TOTAL - START : SEG_SIZE ))
+    EXPECTED=$(( (i == SEGS - 1) ? TOTAL - START : SEG_SIZE ))
 
     if [ -f "$PART" ]; then
-        local PSIZE=$(stat -c%s "$PART" 2>/dev/null || echo 0)
+        PSIZE=$(stat -c%s "$PART" 2>/dev/null || echo 0)
         if [ "$PSIZE" -eq "$EXPECTED" ]; then
             echo "$(date): seg_$i already complete ($PSIZE bytes)" | tee -a "$LOG"
             return 0
@@ -43,7 +43,7 @@ download_seg() {
     else
         curl -s --retry 10 --retry-delay 5 -C - -o "$PART" -r "$START-$END" "$URL"
     fi
-    local PSIZE=$(stat -c%s "$PART" 2>/dev/null || echo 0)
+    PSIZE=$(stat -c%s "$PART" 2>/dev/null || echo 0)
     echo "$(date): seg_$i finished, size $PSIZE (expected $EXPECTED)" | tee -a "$LOG"
 }
 
@@ -63,8 +63,8 @@ echo "$(date): All downloads finished." | tee -a "$LOG"
 # verify
 MISS=0
 for i in $(seq 0 $((SEGS - 1))); do
-    local EXPECTED=$(( (i == SEGS - 1) ? TOTAL - i * SEG_SIZE : SEG_SIZE ))
-    local PSIZE=$(stat -c%s "$PARTDIR/seg_$i" 2>/dev/null || echo 0)
+    EXPECTED=$(( (i == SEGS - 1) ? TOTAL - i * SEG_SIZE : SEG_SIZE ))
+    PSIZE=$(stat -c%s "$PARTDIR/seg_$i" 2>/dev/null || echo 0)
     if [ "$PSIZE" -ne "$EXPECTED" ]; then
         echo "$(date): ERROR seg_$i size mismatch ($PSIZE vs $EXPECTED)" | tee -a "$LOG"
         MISS=$((MISS+1))
