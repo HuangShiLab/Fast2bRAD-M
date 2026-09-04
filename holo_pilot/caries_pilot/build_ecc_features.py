@@ -8,11 +8,31 @@ from pathlib import Path
 import pandas as pd
 
 # Candidate gene intervals on T2T-CHM13v2.0 RefSeq (1-based inclusive).
-# See holo2bRAD/results/candidate_loci_coverage.md
+# Includes classic caries-susceptibility genes (enamel, immune, taste, vitamin D)
+# plus milk-digestion loci as positive controls.
 CANDIDATE_INTERVALS = {
+    # Positive controls: diet/lactase related
     "FUT2": ("NC_060943.1", 51690377, 51700359),
     "LCT": ("NC_060926.1", 136228325, 136281636),
     "ABO": ("NC_060933.1", 145463984, 145489076),
+    # Enamel / dentin matrix genes
+    "ENAM": ("NC_060928.1", 73971213, 73989293),
+    "AMBN": ("NC_060928.1", 73933220, 73948252),
+    "MMP20": ("NC_060935.1", 102579028, 102627492),
+    "AMELX": ("NC_060947.1", 10875912, 10892087),
+    "TUFT1": ("NC_060925.1", 150663979, 150707247),
+    "KLK4": ("NC_060943.1", 53994435, 53999407),
+    "DSPP": ("NC_060928.1", 90935096, 90943283),
+    # Immune / defence / taste / vitamin D
+    "TAS2R38": ("NC_060931.1", 143288364, 143289506),
+    "DEFB1": ("NC_060932.1", 6625781, 6633102),
+    "MBL2": ("NC_060934.1", 53612365, 53619761),
+    "VDR": ("NC_060936.1", 47802918, 47866398),
+    # Matrix metalloproteinases
+    "MMP2": ("NC_060940.1", 61276956, 61304813),
+    "MMP3": ("NC_060935.1", 102839570, 102847378),
+    "MMP9": ("NC_060944.1", 47744921, 47752589),
+    "MMP13": ("NC_060935.1", 102946765, 102959501),
 }
 
 
