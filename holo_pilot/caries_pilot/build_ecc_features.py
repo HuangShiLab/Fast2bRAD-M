@@ -127,6 +127,16 @@ def main():
     # fill missing SNPs with dosage -1 for downstream imputation
     host_df = host_df.fillna(-1)
 
+    # Keep only polymorphic SNPs: at least 2 non-missing samples and
+    # more than one distinct dosage among non-missing calls.
+    snp_cols = [c for c in host_df.columns if c != "host_fraction"]
+    keep_cols = ["host_fraction"]
+    for col in snp_cols:
+        observed = host_df[col].replace(-1, pd.NA).dropna().astype(float)
+        if observed.nunique() > 1 and observed.shape[0] >= 2:
+            keep_cols.append(col)
+    host_df = host_df[keep_cols]
+
     # Align to metadata order
     species_df = species_df.loc[meta["sample_id"]]
     host_df = host_df.loc[meta["sample_id"]]
