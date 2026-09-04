@@ -21,3 +21,8 @@ Data paths on HPC:
 If the NCBI SRA prefetch stalls, `scripts/download_ebi_then_process.sh` fetches the
 same run directly from ENA (`SRR2027758.fastq.gz`), decompresses with `pigz`, splits
 by sample prefix, and submits the SLURM `f2brad-holo classify` job.
+
+`scripts/download_ebi_multiseg.sh` is an alternative that splits the EBI FASTQ into
+32 HTTP range segments, downloads 4 at a time with resume/retry, concatenates,
+and then runs the split + classify pipeline. Use this if the single-stream wget
+is throttled.
