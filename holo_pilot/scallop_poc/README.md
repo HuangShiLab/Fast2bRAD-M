@@ -16,3 +16,8 @@ Data paths on HPC:
 - db:    `/lustre1/g/aos_shihuang/holo2bRAD/scallop_poc/db`
 - ref:   `/lustre1/g/aos_shihuang/holo2bRAD/scallop_poc/ref`
 - results: `/lustre1/g/aos_shihuang/holo2bRAD/scallop_poc/results`
+
+## Fallback: EBI FASTQ download
+If the NCBI SRA prefetch stalls, `scripts/download_ebi_then_process.sh` fetches the
+same run directly from ENA (`SRR2027758.fastq.gz`), decompresses with `pigz`, splits
+by sample prefix, and submits the SLURM `f2brad-holo classify` job.
