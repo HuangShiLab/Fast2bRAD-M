@@ -15,11 +15,12 @@
     - [extract](#extract)
     - [build-qual-db](#build-qual-db)
     - [build-quan-db](#build-quan-db)
+    - [dedup-db](#dedup-db)
     - [quantify](#quantify)
     - [find-genome](#find-genome)
     - [merge](#merge)
     - [predict](#predict)
-    - [classify](#classify)
+    - [inspect](#inspect)
     - [pipeline](#pipeline)
   - [f2brad-host](#f2brad-host)
     - [digest](#digest)
@@ -42,9 +43,9 @@
 - **All Input Types** — Reference genomes, Shotgun metagenomic reads (SE/PE), and single 2bRAD tags
 - **Built-in QC** — N-ratio, minimum quality score, and minimum quality-percent filtering
 - **Functional Prediction** — Matrix-multiplication-based functional abundance profiling (KO, KEGG, etc.)
-- **ML Contamination Classification** — ONNX-based classification to detect contaminated taxa
 - **Host Genotyping** — `f2brad-host` builds a host tag database and calls genotypes from 2bRAD reads
 - **Holo-2bRAD Integration** — `f2brad-holo` performs one-pass joint host genotyping + microbial profiling with microbial cross-assignment masking
+- **Database Inspection** — `inspect` reports format, tag counts and example records from binary `.iibdb`/`.iibsp` files
 - **Resume Support** — `.done` marker files allow interrupted runs to be resumed without re-computation
 - **One-Command Pipeline** — The `pipeline` subcommand chains all steps automatically
 
@@ -137,10 +138,9 @@ Raw reads (FASTQ)
       │
       ▼ (optional, requires --ko-mapping)
 [7] predict          →  05_merge/{prefix}.func.xls
-      │
-      ▼ (optional, requires ONNX model)
-[8] classify         →  per-sample classification with Prediction labels
 ```
+
+`dedup-db` provides an alternative way to obtain a quantitative database: it converts a qualitative `.iibdb` into a quantitative one by dropping any tag that maps to more than one GCF. This single-GCF database is the format consumed by `f2brad-holo classify`.
 
 ---
 
@@ -150,7 +150,7 @@ The project provides three command-line binaries:
 
 | Binary | Purpose |
 |--------|---------|
-| `fast2bRAD-M` | Core microbiome profiling pipeline (extract → build-db → quantify → merge → predict/classify) |
+| `fast2bRAD-M` | Core microbiome profiling pipeline (extract → build-db → quantify → merge → predict) |
 | `f2brad-host` | Host 2bRAD analysis: in-silico digest, microbial cross-assignment masking, host DB construction, and genotyping |
 | `f2brad-holo` | One-pass holo-2bRAD driver: joint host genotyping + microbial profiling |
 
@@ -283,7 +283,7 @@ Calculate per-taxon relative abundance for one or more samples.
 ```bash
 fast2bRAD-M quantify \
   -l sample_list.tsv \   # sample_name<TAB>path_to.iibsp
-  -d database_dir/ \     # directory with BcgI.species.iibdb + classify file
+  -d database_dir/ \     # directory with BcgI.species.iibdb + taxonomy mapping file
   -t species \
   -s BcgI \
   -o quantify_out/ \
@@ -388,32 +388,49 @@ KO00002    0.00000000  0.04321098  ...
 
 ---
 
-### `classify`
+### `dedup-db`
 
-ML-based contamination classification using an ONNX model. Adds a `Prediction` column to the quantify output for each taxonomic entry.
-
-**Features used** (4-dim input):
-1. `ln(Sequenced_Tag_Num / Theoretical_Tag_Num)` — coverage ratio
-2. `ln(G_score)` — combined breadth × depth
-3. `ln(Sequenced_Reads_Num / Sequenced_Tag_Num)` — average depth
-4. `ln(Theoretical_Reads / Total_Reads)` — theoretical abundance
+Convert a qualitative compact database (`.iibdb`) into a quantitative database by keeping only tags that map to a single GCF. This is the database format expected by `f2brad-holo classify` for microbial profiling.
 
 ```bash
-fast2bRAD-M classify \
-  -i 04_quantify/sample1/sample1.BcgI.xls \
-  -m contamination_model.onnx \
-  -o sample1.BcgI.classified.xls
+fast2bRAD-M dedup-db \
+  -i qual_db/BcgI.species.iibdb \
+  -o quan_db/BcgI.species.quant.iibdb
 ```
 
 **Parameters**:
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `-i` / `--input` | Yes | Input abundance table from `quantify` step |
-| `-m` / `--model` | Yes | ONNX model file path |
-| `-o` / `--output` | Yes | Output file path |
+| `-i` / `--input` | Yes | Input qualitative `.iibdb` |
+| `-o` / `--output` | Yes | Output quantitative `.iibdb` |
 
 **Output**:
-- Same TSV format as input with an additional `Prediction` column (integer label from the ONNX model)
+- A quantitative `.iibdb` where every tag hash is unique to one reference genome
+
+---
+
+### `inspect`
+
+Inspect `.iibdb` / `.iibsp` binary files: show format, tag counts and example records.
+
+```bash
+fast2bRAD-M inspect qual_db/BcgI.species.iibdb
+
+# Full scan with per-genome counts
+fast2bRAD-M inspect -f -t 20 qual_db/BcgI.species.iibdb
+```
+
+**Parameters**:
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-f` / `--full` | off | Count every tag (and per-genome tag counts). Slow on large DBs |
+| `--distinct` | off | With `--full`, also count distinct tag hashes (memory-heavy) |
+| `-n` / `--records` | 5 | Number of example records to print per file |
+| `-t` / `--top` | 10 | Number of top genomes to list |
+| `-o` / `--output` | stdout | Write report to file |
+
+**Output**:
+- Human-readable report: file format, record count, example records, and (with `--full`) per-genome tag counts
 
 ---
 
@@ -625,6 +642,42 @@ f2brad-holo classify \
   -j 8
 ```
 
+Batch mode (process many samples in parallel):
+
+```bash
+f2brad-holo classify \
+  -d chm13v2.0_BcgI.host_db.tsv \
+  -m microbial_db/BcgI.species.quant.iibdb \
+  --microbe-db-dir microbial_db/ \
+  --microbe-mask chm13v2.0_BcgI_cross/mask.list \
+  -l samples.tsv \
+  -s BcgI \
+  -o holo_results/ \
+  --exclude-human \
+  -j 16
+```
+
+**Parameters**:
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `-d` / `--host-db` | Yes | Host tag database TSV from `f2brad-host build-db` |
+| `-m` / `--microbe-db` | Yes | Microbial quantitative `.iibdb` (single-GCF, from `dedup-db`) |
+| `--microbe-db-dir` | No | Directory with `{enzyme}.{level}.iibdb` + `abfh_classify_with_speciename.txt.gz`; enables `species_counts.tsv` |
+| `--microbe-mask` | No | Canonical-tag mask of human-to-microbe cross-assignable tags |
+| `-1` / `--r1` | Yes* | Read 1 FASTQ (gzip ok). *Ignored when `-l` is used |
+| `-2` / `--r2` | No | Read 2 FASTQ (gzip ok). *Ignored when `-l` is used |
+| `-l` / `--sample-list` | No | Batch sample list: `sample_name<TAB>r1_path[<TAB>r2_path]` |
+| `-s` / `--site` | Yes | Enzyme name or ID (1–16) |
+| `-o` / `--output` | Yes | Output directory |
+| `--sample-name` | No | Sample name for single-sample mode [default: `sample`] |
+| `--host-max-mismatch` | No | Max Hamming distance for host tag matching [default: 2] |
+| `-q` / `--min-qual` | No | Min Phred quality for genotype pileup [default: 20] |
+| `--min-depth` | No | Min per-locus depth to emit a genotype [default: 4] |
+| `-t` / `--taxonomy` | No | Taxonomy level for microbial counts [default: `species`] |
+| `--output-iibsp` | No | Write `sample.iibsp.gz` for downstream `fast2bRAD-M quantify` |
+| `--exclude-human` | No | Drop GCFs whose species is `human` from the microbial DB |
+| `-j` / `--threads` | No | Threads [default: 4] |
+
 **Output**:
 - `genotypes.vcf` — host genotype calls
 - `species_counts.tsv` — microbial taxon counts (when `--microbe-db-dir` is provided)
@@ -742,10 +795,6 @@ results/
     ├── run1.filtered.xls          # Filtered (mock/control removed)
     ├── run1.func.xls              # Functional abundance (if --ko-mapping used)
     └── .done
-
-├── classify/                      # ML classification results (optional)
-│   ├── sample1.BcgI.classified.xls   # Per-sample with Prediction column
-│   └── sample2.BcgI.classified.xls
 ```
 
 ---
