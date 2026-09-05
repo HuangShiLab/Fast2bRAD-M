@@ -27,7 +27,7 @@
     - [build-db](#build-db)
     - [genotype](#genotype)
   - [f2brad-holo](#f2brad-holo)
-    - [classify-1](#classify-1)
+    - [classify](#classify)
 - [File Formats](#file-formats)
 - [Supported Enzymes](#supported-enzymes)
 - [Output Directory Structure](#output-directory-structure)
@@ -597,7 +597,8 @@ f2brad-host genotype \
 ```
 
 **Output**:
-- `genotypes.tsv` — per-locus genotype calls with allele depths and quality metrics
+- `genotypes.vcf` — per-locus diploid genotype calls (GT/DP/AD/PL) in VCF 4.2 format
+- `dosages.bimbam` — mean dosages for downstream SNP-based analyses
 
 ---
 
@@ -612,8 +613,9 @@ Run host genotyping and microbial profiling in a single pass. This is useful for
 ```bash
 f2brad-holo classify \
   -d chm13v2.0_BcgI.host_db.tsv \
-  -m microbial_db/BcgI.species.iibdb \
+  -m microbial_db/BcgI.species.quant.iibdb \
   --microbe-db-dir microbial_db/ \
+  --microbe-mask chm13v2.0_BcgI_cross/mask.list \
   -1 sample_R1.fq.gz \
   -2 sample_R2.fq.gz \
   -s BcgI \
@@ -624,8 +626,9 @@ f2brad-holo classify \
 ```
 
 **Output**:
-- `genotypes.tsv` — host genotype calls
-- `microbe_counts.tsv` — microbial taxon counts (when `--microbe-db-dir` is provided)
+- `genotypes.vcf` — host genotype calls
+- `species_counts.tsv` — microbial taxon counts (when `--microbe-db-dir` is provided)
+- `holo_classify.tsv` — read-classification summary (host/microbe/ambiguous fractions)
 - `sample.iibsp.gz` — optional sample tag stream for downstream `fast2bRAD-M quantify` (with `--output-iibsp`)
 
 ---
