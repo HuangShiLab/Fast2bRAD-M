@@ -11,15 +11,23 @@
 - [Quick Start](#quick-start)
 - [Pipeline Overview](#pipeline-overview)
 - [Subcommands](#subcommands)
-  - [extract](#extract)
-  - [build-qual-db](#build-qual-db)
-  - [build-quan-db](#build-quan-db)
-  - [quantify](#quantify)
-  - [find-genome](#find-genome)
-  - [merge](#merge)
-  - [predict](#predict)
-  - [classify](#classify)
-  - [pipeline](#pipeline)
+  - [fast2bRAD-M core](#fast2brad-m-core)
+    - [extract](#extract)
+    - [build-qual-db](#build-qual-db)
+    - [build-quan-db](#build-quan-db)
+    - [quantify](#quantify)
+    - [find-genome](#find-genome)
+    - [merge](#merge)
+    - [predict](#predict)
+    - [classify](#classify)
+    - [pipeline](#pipeline)
+  - [f2brad-host](#f2brad-host)
+    - [digest](#digest)
+    - [cross](#cross)
+    - [build-db](#build-db)
+    - [genotype](#genotype)
+  - [f2brad-holo](#f2brad-holo)
+    - [classify-1](#classify-1)
 - [File Formats](#file-formats)
 - [Supported Enzymes](#supported-enzymes)
 - [Output Directory Structure](#output-directory-structure)
@@ -35,6 +43,8 @@
 - **Built-in QC** — N-ratio, minimum quality score, and minimum quality-percent filtering
 - **Functional Prediction** — Matrix-multiplication-based functional abundance profiling (KO, KEGG, etc.)
 - **ML Contamination Classification** — ONNX-based classification to detect contaminated taxa
+- **Host Genotyping** — `f2brad-host` builds a host tag database and calls genotypes from 2bRAD reads
+- **Holo-2bRAD Integration** — `f2brad-holo` performs one-pass joint host genotyping + microbial profiling with microbial cross-assignment masking
 - **Resume Support** — `.done` marker files allow interrupted runs to be resumed without re-computation
 - **One-Command Pipeline** — The `pipeline` subcommand chains all steps automatically
 
@@ -135,6 +145,18 @@ Raw reads (FASTQ)
 ---
 
 ## Subcommands
+
+The project provides three command-line binaries:
+
+| Binary | Purpose |
+|--------|---------|
+| `fast2bRAD-M` | Core microbiome profiling pipeline (extract → build-db → quantify → merge → predict/classify) |
+| `f2brad-host` | Host 2bRAD analysis: in-silico digest, microbial cross-assignment masking, host DB construction, and genotyping |
+| `f2brad-holo` | One-pass holo-2bRAD driver: joint host genotyping + microbial profiling |
+
+---
+
+## fast2bRAD-M core
 
 ### `extract`
 
@@ -497,6 +519,114 @@ fast2bRAD-M pipeline \
 | `--mock` | — | Comma-separated mock sample names (for merge filtering) |
 | `--control` | — | Comma-separated negative control names (for merge filtering) |
 | `--ko-mapping` | — | Species-to-function mapping matrix; triggers `predict` step after merge |
+
+---
+
+## `f2brad-host`
+
+Host-side utilities for holo-2bRAD analysis. The typical workflow is:
+
+1. `digest` the host reference genome (e.g. T2T-CHM13v2.0) to obtain per-locus tags.
+2. `cross` compare those human tags against a microbial genome database to identify tags that could be mis-assigned to microbes.
+3. `build-db` create a masked host tag database, optionally removing cross-assignable tags.
+4. `genotype` a 2bRAD sample against the host database.
+
+### `digest`
+
+In-silico digest a reference genome and report tag-level statistics.
+
+```bash
+f2brad-host digest \
+  -i chm13v2.0.fa.gz \
+  -s BcgI \
+  -o chm13v2.0_BcgI_digest/ \
+  -j 8
+```
+
+**Output**:
+- `sites.tsv` — one row per tag locus with sequence, canonical sequence, hash, GC fraction, CpG count, and uniqueness flag
+- `stat.tsv` — summary statistics
+
+### `cross`
+
+Cross-assignment collision analysis: scan human tags against microbial genomes to find tags that match microbial sequences within a Hamming-distance threshold. These tags should be masked from the host genotype database when analyzing human microbiome samples.
+
+```bash
+f2brad-host cross \
+  -t chm13v2.0_BcgI_digest/sites.tsv \
+  -l microbial_genome_list.tsv \
+  -s BcgI \
+  -o chm13v2.0_BcgI_cross/ \
+  --max-mismatch 2 \
+  -j 16
+```
+
+**Output**:
+- `collisions.tsv` — per-human-tag collision report
+- `mask.list` — one canonical hash per line, ready for `build-db --human-mask`
+
+### `build-db`
+
+Build a host tag database from a `digest` sites file and an optional cross-assignment mask.
+
+```bash
+f2brad-host build-db \
+  -t chm13v2.0_BcgI_digest/sites.tsv \
+  -m chm13v2.0_BcgI_cross/mask.list \
+  -s BcgI \
+  -o chm13v2.0_BcgI.host_db.tsv
+```
+
+**Output**:
+- A TSV host tag database with columns `contig`, `pos`, `strand`, `seq`, `canonical`, `hash`, `gc_frac`, `cpg_count`, `cpg_island`, `unique`
+
+### `genotype`
+
+Genotype a 2bRAD sample against a host tag database.
+
+```bash
+f2brad-host genotype \
+  -d chm13v2.0_BcgI.host_db.tsv \
+  -1 sample_R1.fq.gz \
+  -2 sample_R2.fq.gz \
+  -s BcgI \
+  -o sample_genotype/ \
+  --max-mismatch 2 \
+  --min-depth 4 \
+  -j 8
+```
+
+**Output**:
+- `genotypes.tsv` — per-locus genotype calls with allele depths and quality metrics
+
+---
+
+## `f2brad-holo`
+
+One-pass holo-2bRAD driver that jointly profiles host genotypes and microbial composition from the same 2bRAD library.
+
+### `classify`
+
+Run host genotyping and microbial profiling in a single pass. This is useful for human microbiome samples where the same sequencing reads contain both host and microbial 2bRAD tags.
+
+```bash
+f2brad-holo classify \
+  -d chm13v2.0_BcgI.host_db.tsv \
+  -m microbial_db/BcgI.species.iibdb \
+  --microbe-db-dir microbial_db/ \
+  -1 sample_R1.fq.gz \
+  -2 sample_R2.fq.gz \
+  -s BcgI \
+  -o holo_results/sample1/ \
+  --sample-name sample1 \
+  --exclude-human \
+  -j 8
+```
+
+**Output**:
+- `genotypes.tsv` — host genotype calls
+- `microbe_counts.tsv` — microbial taxon counts (when `--microbe-db-dir` is provided)
+- `sample.iibsp.gz` — optional sample tag stream for downstream `fast2bRAD-M quantify` (with `--output-iibsp`)
 
 ---
 
