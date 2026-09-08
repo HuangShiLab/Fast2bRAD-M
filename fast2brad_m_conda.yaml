@@ -7,3 +7,8 @@ dependencies:
   - pear
   - zlib
   - openssl
+  - pip
+  - pip:
+      - zstandard
+      - marisa-trie
+      - pandas

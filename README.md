@@ -45,6 +45,7 @@
 - **Functional Prediction** — Matrix-multiplication-based functional abundance profiling (KO, KEGG, etc.)
 - **Host Genotyping** — `f2brad-host` builds a host tag database and calls genotypes from 2bRAD reads
 - **Holo-2bRAD Integration** — `f2brad-holo` performs one-pass joint host genotyping + microbial profiling with microbial cross-assignment masking
+- **Viral Profiling (VIP2B)** — Convert the VIP2B UHGV viral database and profile viruses with the same 8-enzyme strategy
 - **Database Inspection** — `inspect` reports format, tag counts and example records from binary `.iibdb`/`.iibsp` files
 - **Resume Support** — `.done` marker files allow interrupted runs to be resumed without re-computation
 - **One-Command Pipeline** — The `pipeline` subcommand chains all steps automatically
@@ -683,6 +684,82 @@ f2brad-holo classify \
 - `species_counts.tsv` — microbial taxon counts (when `--microbe-db-dir` is provided)
 - `holo_classify.tsv` — read-classification summary (host/microbe/ambiguous fractions)
 - `sample.iibsp.gz` — optional sample tag stream for downstream `fast2bRAD-M quantify` (with `--output-iibsp`)
+
+---
+
+## Viral profiling with VIP2B
+
+Fast2bRAD-M ships with helper scripts that reuse the [VIP2B](https://github.com/sunzhengCDNM/VIP2B) UHGV gut-viral database inside the existing `fast2bRAD-M quantify` framework.
+
+### 1. Obtain the VIP2B database
+
+Download the three files below from the VIP2B Zenodo record (e.g. `https://zenodo.org/records/18944630`):
+
+- `8Enzyme.Species.uniq.marisa`
+- `abfh_classify_with_speciename.txt.gz`
+- `metadata.tsv.gz`
+
+### 2. Convert to fast2bRAD-M format
+
+```bash
+python tools/convert_vip2b_db.py \
+  -m 8Enzyme.Species.uniq.marisa \
+  -c abfh_classify_with_speciename.txt.gz \
+  -o vip2b_db/ \
+  -l species \
+  -s BcgI
+```
+
+This produces:
+- `vip2b_db/BcgI.species.iibdb` (placeholder enzyme name for the combined 8-enzyme DB)
+- `vip2b_db/abfh_classify_with_speciename.txt.gz`
+- `vip2b_db/BcgI.species.iibdb.stats.txt`
+
+> **Note on the `-s` placeholder**: VIP2B's `8Enzyme.Species.uniq` database already contains tags from all eight enzymes (AlfI, BcgI, BslFI, CjeI, CjePI, FalI, HaeIV, Hin4I). `fast2bRAD-M quantify` requires a valid enzyme name purely for output naming, so `convert_vip2b_db.py` defaults to `BcgI`. The actual quantification below extracts tags with all eight enzymes and merges them before profiling.
+
+### 3. Profile samples
+
+Prepare a sample list (`samples.tsv`):
+
+```tsv
+sample1  /path/sample1_R1.fq.gz  /path/sample1_R2.fq.gz
+sample2  /path/sample2_R1.fq.gz
+```
+
+Run the 8-enzyme wrapper:
+
+```bash
+python tools/quantify_vip2b.py \
+  -i samples.tsv \
+  -d vip2b_db/ \
+  -o vip2b_results/ \
+  -j 16 \
+  --qc no
+```
+
+Outputs:
+- `vip2b_results/01_extract/` — per-enzyme `.iibsp` files and combined `.VIP2B.iibsp`
+- `vip2b_results/02_quantify/{sample}/{sample}.BcgI.xls` — per-sample viral abundance
+- `vip2b_results/03_profiles/{sample}.VIP2B.xls` — convenience copy of each profile
+- `vip2b_results/VIP2B.all.xls` and `VIP2B.filtered.xls` — merged abundance matrix (if ≥2 samples)
+
+For already-demultiplexed 2bRAD tag reads, use `--input-type 3`. For WGS/shotgun data (default), use `--input-type 2`.
+
+### 4. Annotate with viral metadata
+
+```bash
+python tools/annotate_vip2b.py \
+  -i vip2b_results/VIP2B.all.xls \
+  -d vip2b_db/metadata.tsv.gz \
+  -o vip2b_results/annotation/
+```
+
+This writes:
+- `Phenotype.tsv` — lifestyle, jumbo-phage status, viralverify prediction
+- `viral_function/Uniref90.tsv` — normalized UniRef90 gene abundance
+- `viral_function/cluster.tsv` — normalized info-annotation cluster abundance
+- `viral_taxonomy/{kingdom..genus}_abund.tsv` — collapsed viral taxonomy
+- `host_taxonomy/{domain..species}_abund.tsv` — collapsed host taxonomy
 
 ---
 
