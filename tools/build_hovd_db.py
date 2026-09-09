@@ -242,10 +242,13 @@ def build_hovd_db(
     gcf_to_idx = {cid: i for i, cid in enumerate(gcf_order)}
 
     # 写分类文件
+    # HOVD 的 OPD 中 99%+ species 为 unknown，为了保留可注释的最低单元，
+    # 把 Species 列替换为 contig_id，让 quantify 输出 contig-level abundance。
     classify_out = outdir / "abfh_classify_with_speciename.txt.gz"
     with gzip.open(classify_out, "wt", encoding="utf-8") as fh:
         for cid in gcf_order:
-            fh.write("\t".join([cid] + tax_map[cid]) + "\n")
+            tax = tax_map[cid][:6] + [cid]  # Kingdom..Genus + contig_id as Species
+            fh.write("\t".join([cid] + tax) + "\n")
     sys.stderr.write(f"Wrote classify file: {classify_out}\n")
 
     # 写 metadata 文件

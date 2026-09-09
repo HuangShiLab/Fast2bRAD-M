@@ -59,8 +59,9 @@ def parse_abundance(path: Path) -> Tuple[List[str], List[str], List[Dict[str, ob
         taxonomy_cols = []
         sample_cols = []
         for h in header:
-            if h in ("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species", "Strain"):
-                taxonomy_cols.append(h)
+            hc = h.lstrip("#")
+            if hc in ("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species", "Strain"):
+                taxonomy_cols.append(hc)
             else:
                 sample_cols.append(h)
         species_idx = taxonomy_cols.index("Species")

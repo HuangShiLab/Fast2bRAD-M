@@ -69,12 +69,13 @@ def parse_abundance(path: Path) -> Tuple[List[str], List[str], List[Dict[str, ob
     rows: List[Dict[str, object]] = []
     with opener(path, "rt", encoding="utf-8") as fh:
         header = fh.readline().rstrip("\n\r").split("\t")
-        # fast2bRAD-M merge 的表头：Kingdom Phylum Class Order Family Genus Species sample1 ...
+        # fast2bRAD-M merge 的表头：#Kingdom Phylum Class Order Family Genus Species sample1 ...
         taxonomy_cols = []
         sample_cols = []
         for i, h in enumerate(header):
-            if h in ("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species", "Strain"):
-                taxonomy_cols.append(h)
+            hc = h.lstrip("#")
+            if hc in ("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species", "Strain"):
+                taxonomy_cols.append(hc)
             else:
                 sample_cols.append(h)
         if "Species" not in taxonomy_cols:

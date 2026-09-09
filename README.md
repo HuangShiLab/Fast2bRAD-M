@@ -749,7 +749,7 @@ This produces:
 - `hovd_db/metadata.tsv.gz`
 - `hovd_db/BcgI.species.iibdb.stats.txt`
 
-> **Taxonomy note**: HOVD marks many OPD contigs with `uc_*` (unclassified) at species/genus level. `build_hovd_db.py` converts these to `unknown` so the output follows the same convention as other fast2bRAD-M databases. As a result, species-level profiling is often dominated by `unknown`; family- or class-level summaries are usually more informative for oral phage communities.
+> **Taxonomy note**: HOVD marks many OPD contigs with `uc_*` (unclassified) at species/genus level. `build_hovd_db.py` converts these to `unknown` and uses the HOVD `contig_id` as the `Species` column so that every abundance row remains identifiable and can be annotated with metadata. You can collapse the resulting contig-level profile to family/class/phylum using `annotate_hovd.py` or your own post-processing.
 
 ### Profile samples
 
