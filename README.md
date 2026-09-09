@@ -687,11 +687,18 @@ f2brad-holo classify \
 
 ---
 
-## Viral profiling with VIP2B
+## Viral profiling
 
-Fast2bRAD-M ships with helper scripts that reuse the [VIP2B](https://github.com/sunzhengCDNM/VIP2B) UHGV gut-viral database inside the existing `fast2bRAD-M quantify` framework.
+Fast2bRAD-M ships with helper scripts that reuse 8-enzyme viral databases inside the existing `fast2bRAD-M quantify` framework. Two databases are currently supported:
 
-### 1. Obtain the VIP2B database
+- **[VIP2B](https://github.com/sunzhengCDNM/VIP2B)** — gut/phage database based on UHGV
+- **[HOVD](https://hovd.org)** — Human Oral Virome Database (OPD + OED)
+
+Both use the same 8-enzyme strategy (AlfI, BcgI, BslFI, CjeI, CjePI, FalI, HaeIV, Hin4I) and the same `quantify_vip2b.py` wrapper.
+
+### VIP2B database
+
+#### 1. Obtain the VIP2B database
 
 Download the three files below from the VIP2B Zenodo record (e.g. `https://zenodo.org/records/18944630`):
 
@@ -699,7 +706,7 @@ Download the three files below from the VIP2B Zenodo record (e.g. `https://zenod
 - `abfh_classify_with_speciename.txt.gz`
 - `metadata.tsv.gz`
 
-### 2. Convert to fast2bRAD-M format
+#### 2. Convert to fast2bRAD-M format
 
 ```bash
 python tools/convert_vip2b_db.py \
@@ -715,9 +722,36 @@ This produces:
 - `vip2b_db/abfh_classify_with_speciename.txt.gz`
 - `vip2b_db/BcgI.species.iibdb.stats.txt`
 
-> **Note on the `-s` placeholder**: VIP2B's `8Enzyme.Species.uniq` database already contains tags from all eight enzymes (AlfI, BcgI, BslFI, CjeI, CjePI, FalI, HaeIV, Hin4I). `fast2bRAD-M quantify` requires a valid enzyme name purely for output naming, so `convert_vip2b_db.py` defaults to `BcgI`. The actual quantification below extracts tags with all eight enzymes and merges them before profiling.
+> **Note on the `-s` placeholder**: VIP2B's `8Enzyme.Species.uniq` database already contains tags from all eight enzymes. `fast2bRAD-M quantify` requires a valid enzyme name purely for output naming, so `convert_vip2b_db.py` defaults to `BcgI`. The actual quantification below extracts tags with all eight enzymes and merges them before profiling.
 
-### 3. Profile samples
+### HOVD database
+
+#### 1. Obtain HOVD
+
+Download the genome FASTA and annotation table from [https://hovd.org](https://hovd.org):
+
+- `HOVD-geneseqences.fasta`
+- `HOVD-annotations.xlsx`
+
+#### 2. Build the 8-enzyme fast2bRAD-M database
+
+```bash
+python tools/build_hovd_db.py \
+  --fasta HOVD-geneseqences.fasta \
+  --annotation HOVD-annotations.xlsx \
+  -o hovd_db/ \
+  -j 8
+```
+
+This produces:
+- `hovd_db/BcgI.species.iibdb`
+- `hovd_db/abfh_classify_with_speciename.txt.gz`
+- `hovd_db/metadata.tsv.gz`
+- `hovd_db/BcgI.species.iibdb.stats.txt`
+
+> **Taxonomy note**: HOVD marks many OPD contigs with `uc_*` (unclassified) at species/genus level. `build_hovd_db.py` converts these to `unknown` so the output follows the same convention as other fast2bRAD-M databases. As a result, species-level profiling is often dominated by `unknown`; family- or class-level summaries are usually more informative for oral phage communities.
+
+### Profile samples
 
 Prepare a sample list (`samples.tsv`):
 
@@ -726,26 +760,29 @@ sample1  /path/sample1_R1.fq.gz  /path/sample1_R2.fq.gz
 sample2  /path/sample2_R1.fq.gz
 ```
 
-Run the 8-enzyme wrapper:
+Run the 8-enzyme wrapper (replace `hovd_db/` with `vip2b_db/` for VIP2B):
 
 ```bash
 python tools/quantify_vip2b.py \
   -i samples.tsv \
-  -d vip2b_db/ \
-  -o vip2b_results/ \
+  -d hovd_db/ \
+  -o hovd_results/ \
   -j 16 \
-  --qc no
+  --qc no \
+  --merge-prefix HOVD
 ```
 
 Outputs:
-- `vip2b_results/01_extract/` — per-enzyme `.iibsp` files and combined `.VIP2B.iibsp`
-- `vip2b_results/02_quantify/{sample}/{sample}.BcgI.xls` — per-sample viral abundance
-- `vip2b_results/03_profiles/{sample}.VIP2B.xls` — convenience copy of each profile
-- `vip2b_results/VIP2B.all.xls` and `VIP2B.filtered.xls` — merged abundance matrix (if ≥2 samples)
+- `{outdir}/01_extract/` — per-enzyme `.iibsp` files and combined `.VIP2B.iibsp`
+- `{outdir}/02_quantify/{sample}/{sample}.BcgI.xls` — per-sample viral abundance
+- `{outdir}/03_profiles/{sample}.VIP2B.xls` — convenience copy of each profile
+- `{outdir}/{prefix}.all.xls` and `{prefix}.filtered.xls` — merged abundance matrix (if ≥2 samples)
 
 For already-demultiplexed 2bRAD tag reads, use `--input-type 3`. For WGS/shotgun data (default), use `--input-type 2`.
 
-### 4. Annotate with viral metadata
+### Annotate with viral metadata
+
+For VIP2B:
 
 ```bash
 python tools/annotate_vip2b.py \
@@ -760,6 +797,19 @@ This writes:
 - `viral_function/cluster.tsv` — normalized info-annotation cluster abundance
 - `viral_taxonomy/{kingdom..genus}_abund.tsv` — collapsed viral taxonomy
 - `host_taxonomy/{domain..species}_abund.tsv` — collapsed host taxonomy
+
+For HOVD:
+
+```bash
+python tools/annotate_hovd.py \
+  -i hovd_results/HOVD.all.xls \
+  -d hovd_db/metadata.tsv.gz \
+  -o hovd_results/annotation/
+```
+
+This writes:
+- `metadata_stats.tsv` — checkv quality, provirus status, geography, oral site
+- `viral_taxonomy/{kingdom..species}_abund.tsv` — collapsed oral viral taxonomy
 
 ---
 
