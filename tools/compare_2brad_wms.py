@@ -46,7 +46,6 @@ def load_table(path: Path) -> Tuple[List[str], List[str], Dict[str, Dict[str, fl
             parts = line.rstrip("\n\r").split("\t")
             if len(parts) < len(header):
                 continue
-            tax_key = "|".join(parts[tax_idx[h]] for h in header if h in taxa_idx and h.lstrip("#") in taxonomy_cols)
             # 用 Species 作为 taxon key 足够比较
             species_idx = header.index("Species") if "Species" in header else -1
             if species_idx >= 0:
@@ -56,7 +55,7 @@ def load_table(path: Path) -> Tuple[List[str], List[str], Dict[str, Dict[str, fl
             rows[tax_key] = {}
             for s in sample_cols:
                 try:
-                    rows[tax_key][s] = float(parts[tax_idx[s]])
+                    rows[tax_key][s] = float(parts[taxa_idx[s]])
                 except (ValueError, KeyError):
                     rows[tax_key][s] = 0.0
         return taxonomy_cols, sample_cols, rows
