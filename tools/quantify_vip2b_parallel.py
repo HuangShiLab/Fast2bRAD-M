@@ -284,6 +284,7 @@ def main():
     quant_threads = max(4, args.threads)
 
     merge_entries = []
+    failed_samples: list[str] = []
     for sample, r1, r2 in samples:
         profile = process_one_sample(
             fast2brad_m,
@@ -304,6 +305,8 @@ def main():
         )
         if profile:
             merge_entries.append((sample, profile))
+        else:
+            failed_samples.append(sample)
 
     if not args.no_merge and len(merge_entries) > 1:
         merge_list = outdir / "merge.list"
@@ -312,6 +315,10 @@ def main():
                 fh.write(f"{sample}\t{path}\n")
         run_merge(fast2brad_m, merge_list, outdir, args.merge_prefix)
         sys.stderr.write(f"Merged tables written to {outdir}/{args.merge_prefix}.{{all,filtered}}.xls\n")
+
+    if failed_samples:
+        sys.stderr.write(f"ERROR: {len(failed_samples)} sample(s) failed: {', '.join(failed_samples)}\n")
+        sys.exit(1)
 
     sys.stderr.write("All done.\n")
 
