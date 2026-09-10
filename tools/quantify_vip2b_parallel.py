@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -163,9 +163,9 @@ def process_one_sample(
     sample_extract_dir = outdir / "01_extract" / sample / sample
     sample_extract_dir.mkdir(parents=True, exist_ok=True)
 
-    # Run 8 enzyme extracts in parallel
+    # Run 8 enzyme extracts in parallel (use threads because work is subprocess-based)
     per_enzyme_iibsp = []
-    with ProcessPoolExecutor(max_workers=len(enzymes)) as executor:
+    with ThreadPoolExecutor(max_workers=len(enzymes)) as executor:
         futures = {
             executor.submit(
                 run_extract,
