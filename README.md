@@ -11,15 +11,24 @@
 - [Quick Start](#quick-start)
 - [Pipeline Overview](#pipeline-overview)
 - [Subcommands](#subcommands)
-  - [extract](#extract)
-  - [build-qual-db](#build-qual-db)
-  - [build-quan-db](#build-quan-db)
-  - [quantify](#quantify)
-  - [find-genome](#find-genome)
-  - [merge](#merge)
-  - [predict](#predict)
-  - [classify](#classify)
-  - [pipeline](#pipeline)
+  - [fast2bRAD-M core](#fast2brad-m-core)
+    - [extract](#extract)
+    - [build-qual-db](#build-qual-db)
+    - [build-quan-db](#build-quan-db)
+    - [dedup-db](#dedup-db)
+    - [quantify](#quantify)
+    - [find-genome](#find-genome)
+    - [merge](#merge)
+    - [predict](#predict)
+    - [inspect](#inspect)
+    - [pipeline](#pipeline)
+  - [f2brad-host](#f2brad-host)
+    - [digest](#digest)
+    - [cross](#cross)
+    - [build-db](#build-db)
+    - [genotype](#genotype)
+  - [f2brad-holo](#f2brad-holo)
+    - [classify](#classify)
 - [File Formats](#file-formats)
 - [Supported Enzymes](#supported-enzymes)
 - [Output Directory Structure](#output-directory-structure)
@@ -34,7 +43,10 @@
 - **All Input Types** — Reference genomes, Shotgun metagenomic reads (SE/PE), and single 2bRAD tags
 - **Built-in QC** — N-ratio, minimum quality score, and minimum quality-percent filtering
 - **Functional Prediction** — Matrix-multiplication-based functional abundance profiling (KO, KEGG, etc.)
-- **ML Contamination Classification** — ONNX-based classification to detect contaminated taxa
+- **Host Genotyping** — `f2brad-host` builds a host tag database and calls genotypes from 2bRAD reads
+- **Holo-2bRAD Integration** — `f2brad-holo` performs one-pass joint host genotyping + microbial profiling with microbial cross-assignment masking
+- **Viral Profiling (VIP2B)** — Convert the VIP2B UHGV viral database and profile viruses with the same 8-enzyme strategy
+- **Database Inspection** — `inspect` reports format, tag counts and example records from binary `.iibdb`/`.iibsp` files
 - **Resume Support** — `.done` marker files allow interrupted runs to be resumed without re-computation
 - **One-Command Pipeline** — The `pipeline` subcommand chains all steps automatically
 
@@ -127,14 +139,25 @@ Raw reads (FASTQ)
       │
       ▼ (optional, requires --ko-mapping)
 [7] predict          →  05_merge/{prefix}.func.xls
-      │
-      ▼ (optional, requires ONNX model)
-[8] classify         →  per-sample classification with Prediction labels
 ```
+
+`dedup-db` provides an alternative way to obtain a quantitative database: it converts a qualitative `.iibdb` into a quantitative one by dropping any tag that maps to more than one GCF. This single-GCF database is the format consumed by `f2brad-holo classify`.
 
 ---
 
 ## Subcommands
+
+The project provides three command-line binaries:
+
+| Binary | Purpose |
+|--------|---------|
+| `fast2bRAD-M` | Core microbiome profiling pipeline (extract → build-db → quantify → merge → predict) |
+| `f2brad-host` | Host 2bRAD analysis: in-silico digest, microbial cross-assignment masking, host DB construction, and genotyping |
+| `f2brad-holo` | One-pass holo-2bRAD driver: joint host genotyping + microbial profiling |
+
+---
+
+## fast2bRAD-M core
 
 ### `extract`
 
@@ -261,7 +284,7 @@ Calculate per-taxon relative abundance for one or more samples.
 ```bash
 fast2bRAD-M quantify \
   -l sample_list.tsv \   # sample_name<TAB>path_to.iibsp
-  -d database_dir/ \     # directory with BcgI.species.iibdb + classify file
+  -d database_dir/ \     # directory with BcgI.species.iibdb + taxonomy mapping file
   -t species \
   -s BcgI \
   -o quantify_out/ \
@@ -366,32 +389,49 @@ KO00002    0.00000000  0.04321098  ...
 
 ---
 
-### `classify`
+### `dedup-db`
 
-ML-based contamination classification using an ONNX model. Adds a `Prediction` column to the quantify output for each taxonomic entry.
-
-**Features used** (4-dim input):
-1. `ln(Sequenced_Tag_Num / Theoretical_Tag_Num)` — coverage ratio
-2. `ln(G_score)` — combined breadth × depth
-3. `ln(Sequenced_Reads_Num / Sequenced_Tag_Num)` — average depth
-4. `ln(Theoretical_Reads / Total_Reads)` — theoretical abundance
+Convert a qualitative compact database (`.iibdb`) into a quantitative database by keeping only tags that map to a single GCF. This is the database format expected by `f2brad-holo classify` for microbial profiling.
 
 ```bash
-fast2bRAD-M classify \
-  -i 04_quantify/sample1/sample1.BcgI.xls \
-  -m contamination_model.onnx \
-  -o sample1.BcgI.classified.xls
+fast2bRAD-M dedup-db \
+  -i qual_db/BcgI.species.iibdb \
+  -o quan_db/BcgI.species.quant.iibdb
 ```
 
 **Parameters**:
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `-i` / `--input` | Yes | Input abundance table from `quantify` step |
-| `-m` / `--model` | Yes | ONNX model file path |
-| `-o` / `--output` | Yes | Output file path |
+| `-i` / `--input` | Yes | Input qualitative `.iibdb` |
+| `-o` / `--output` | Yes | Output quantitative `.iibdb` |
 
 **Output**:
-- Same TSV format as input with an additional `Prediction` column (integer label from the ONNX model)
+- A quantitative `.iibdb` where every tag hash is unique to one reference genome
+
+---
+
+### `inspect`
+
+Inspect `.iibdb` / `.iibsp` binary files: show format, tag counts and example records.
+
+```bash
+fast2bRAD-M inspect qual_db/BcgI.species.iibdb
+
+# Full scan with per-genome counts
+fast2bRAD-M inspect -f -t 20 qual_db/BcgI.species.iibdb
+```
+
+**Parameters**:
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-f` / `--full` | off | Count every tag (and per-genome tag counts). Slow on large DBs |
+| `--distinct` | off | With `--full`, also count distinct tag hashes (memory-heavy) |
+| `-n` / `--records` | 5 | Number of example records to print per file |
+| `-t` / `--top` | 10 | Number of top genomes to list |
+| `-o` / `--output` | stdout | Write report to file |
+
+**Output**:
+- Human-readable report: file format, record count, example records, and (with `--full`) per-genome tag counts
 
 ---
 
@@ -497,6 +537,279 @@ fast2bRAD-M pipeline \
 | `--mock` | — | Comma-separated mock sample names (for merge filtering) |
 | `--control` | — | Comma-separated negative control names (for merge filtering) |
 | `--ko-mapping` | — | Species-to-function mapping matrix; triggers `predict` step after merge |
+
+---
+
+## `f2brad-host`
+
+Host-side utilities for holo-2bRAD analysis. The typical workflow is:
+
+1. `digest` the host reference genome (e.g. T2T-CHM13v2.0) to obtain per-locus tags.
+2. `cross` compare those human tags against a microbial genome database to identify tags that could be mis-assigned to microbes.
+3. `build-db` create a masked host tag database, optionally removing cross-assignable tags.
+4. `genotype` a 2bRAD sample against the host database.
+
+### `digest`
+
+In-silico digest a reference genome and report tag-level statistics.
+
+```bash
+f2brad-host digest \
+  -i chm13v2.0.fa.gz \
+  -s BcgI \
+  -o chm13v2.0_BcgI_digest/ \
+  -j 8
+```
+
+**Output**:
+- `sites.tsv` — one row per tag locus with sequence, canonical sequence, hash, GC fraction, CpG count, and uniqueness flag
+- `stat.tsv` — summary statistics
+
+### `cross`
+
+Cross-assignment collision analysis: scan human tags against microbial genomes to find tags that match microbial sequences within a Hamming-distance threshold. These tags should be masked from the host genotype database when analyzing human microbiome samples.
+
+```bash
+f2brad-host cross \
+  -t chm13v2.0_BcgI_digest/sites.tsv \
+  -l microbial_genome_list.tsv \
+  -s BcgI \
+  -o chm13v2.0_BcgI_cross/ \
+  --max-mismatch 2 \
+  -j 16
+```
+
+**Output**:
+- `collisions.tsv` — per-human-tag collision report
+- `mask.list` — one canonical hash per line, ready for `build-db --human-mask`
+
+### `build-db`
+
+Build a host tag database from a `digest` sites file and an optional cross-assignment mask.
+
+```bash
+f2brad-host build-db \
+  -t chm13v2.0_BcgI_digest/sites.tsv \
+  -m chm13v2.0_BcgI_cross/mask.list \
+  -s BcgI \
+  -o chm13v2.0_BcgI.host_db.tsv
+```
+
+**Output**:
+- A TSV host tag database with columns `contig`, `pos`, `strand`, `seq`, `canonical`, `hash`, `gc_frac`, `cpg_count`, `cpg_island`, `unique`
+
+### `genotype`
+
+Genotype a 2bRAD sample against a host tag database.
+
+```bash
+f2brad-host genotype \
+  -d chm13v2.0_BcgI.host_db.tsv \
+  -1 sample_R1.fq.gz \
+  -2 sample_R2.fq.gz \
+  -s BcgI \
+  -o sample_genotype/ \
+  --max-mismatch 2 \
+  --min-depth 4 \
+  -j 8
+```
+
+**Output**:
+- `genotypes.vcf` — per-locus diploid genotype calls (GT/DP/AD/PL) in VCF 4.2 format
+- `dosages.bimbam` — mean dosages for downstream SNP-based analyses
+
+---
+
+## `f2brad-holo`
+
+One-pass holo-2bRAD driver that jointly profiles host genotypes and microbial composition from the same 2bRAD library.
+
+### `classify`
+
+Run host genotyping and microbial profiling in a single pass. This is useful for human microbiome samples where the same sequencing reads contain both host and microbial 2bRAD tags.
+
+```bash
+f2brad-holo classify \
+  -d chm13v2.0_BcgI.host_db.tsv \
+  -m microbial_db/BcgI.species.quant.iibdb \
+  --microbe-db-dir microbial_db/ \
+  --microbe-mask chm13v2.0_BcgI_cross/mask.list \
+  -1 sample_R1.fq.gz \
+  -2 sample_R2.fq.gz \
+  -s BcgI \
+  -o holo_results/sample1/ \
+  --sample-name sample1 \
+  --exclude-human \
+  -j 8
+```
+
+Batch mode (process many samples in parallel):
+
+```bash
+f2brad-holo classify \
+  -d chm13v2.0_BcgI.host_db.tsv \
+  -m microbial_db/BcgI.species.quant.iibdb \
+  --microbe-db-dir microbial_db/ \
+  --microbe-mask chm13v2.0_BcgI_cross/mask.list \
+  -l samples.tsv \
+  -s BcgI \
+  -o holo_results/ \
+  --exclude-human \
+  -j 16
+```
+
+**Parameters**:
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `-d` / `--host-db` | Yes | Host tag database TSV from `f2brad-host build-db` |
+| `-m` / `--microbe-db` | Yes | Microbial quantitative `.iibdb` (single-GCF, from `dedup-db`) |
+| `--microbe-db-dir` | No | Directory with `{enzyme}.{level}.iibdb` + `abfh_classify_with_speciename.txt.gz`; enables `species_counts.tsv` |
+| `--microbe-mask` | No | Canonical-tag mask of human-to-microbe cross-assignable tags |
+| `-1` / `--r1` | Yes* | Read 1 FASTQ (gzip ok). *Ignored when `-l` is used |
+| `-2` / `--r2` | No | Read 2 FASTQ (gzip ok). *Ignored when `-l` is used |
+| `-l` / `--sample-list` | No | Batch sample list: `sample_name<TAB>r1_path[<TAB>r2_path]` |
+| `-s` / `--site` | Yes | Enzyme name or ID (1–16) |
+| `-o` / `--output` | Yes | Output directory |
+| `--sample-name` | No | Sample name for single-sample mode [default: `sample`] |
+| `--host-max-mismatch` | No | Max Hamming distance for host tag matching [default: 2] |
+| `-q` / `--min-qual` | No | Min Phred quality for genotype pileup [default: 20] |
+| `--min-depth` | No | Min per-locus depth to emit a genotype [default: 4] |
+| `-t` / `--taxonomy` | No | Taxonomy level for microbial counts [default: `species`] |
+| `--output-iibsp` | No | Write `sample.iibsp.gz` for downstream `fast2bRAD-M quantify` |
+| `--exclude-human` | No | Drop GCFs whose species is `human` from the microbial DB |
+| `-j` / `--threads` | No | Threads [default: 4] |
+
+**Output**:
+- `genotypes.vcf` — host genotype calls
+- `species_counts.tsv` — microbial taxon counts (when `--microbe-db-dir` is provided)
+- `holo_classify.tsv` — read-classification summary (host/microbe/ambiguous fractions)
+- `sample.iibsp.gz` — optional sample tag stream for downstream `fast2bRAD-M quantify` (with `--output-iibsp`)
+
+---
+
+## Viral profiling
+
+Fast2bRAD-M ships with helper scripts that reuse 8-enzyme viral databases inside the existing `fast2bRAD-M quantify` framework. Two databases are currently supported:
+
+- **[VIP2B](https://github.com/sunzhengCDNM/VIP2B)** — gut/phage database based on UHGV
+- **[HOVD](https://hovd.org)** — Human Oral Virome Database (OPD + OED)
+
+Both use the same 8-enzyme strategy (AlfI, BcgI, BslFI, CjeI, CjePI, FalI, HaeIV, Hin4I) and the same `quantify_vip2b.py` wrapper.
+
+### VIP2B database
+
+#### 1. Obtain the VIP2B database
+
+Download the three files below from the VIP2B Zenodo record (e.g. `https://zenodo.org/records/18944630`):
+
+- `8Enzyme.Species.uniq.marisa`
+- `abfh_classify_with_speciename.txt.gz`
+- `metadata.tsv.gz`
+
+#### 2. Convert to fast2bRAD-M format
+
+```bash
+python tools/convert_vip2b_db.py \
+  -m 8Enzyme.Species.uniq.marisa \
+  -c abfh_classify_with_speciename.txt.gz \
+  -o vip2b_db/ \
+  -l species \
+  -s BcgI
+```
+
+This produces:
+- `vip2b_db/BcgI.species.iibdb` (placeholder enzyme name for the combined 8-enzyme DB)
+- `vip2b_db/abfh_classify_with_speciename.txt.gz`
+- `vip2b_db/BcgI.species.iibdb.stats.txt`
+
+> **Note on the `-s` placeholder**: VIP2B's `8Enzyme.Species.uniq` database already contains tags from all eight enzymes. `fast2bRAD-M quantify` requires a valid enzyme name purely for output naming, so `convert_vip2b_db.py` defaults to `BcgI`. The actual quantification below extracts tags with all eight enzymes and merges them before profiling.
+
+### HOVD database
+
+#### 1. Obtain HOVD
+
+Download the genome FASTA and annotation table from [https://hovd.org](https://hovd.org):
+
+- `HOVD-geneseqences.fasta`
+- `HOVD-annotations.xlsx`
+
+#### 2. Build the 8-enzyme fast2bRAD-M database
+
+```bash
+python tools/build_hovd_db.py \
+  --fasta HOVD-geneseqences.fasta \
+  --annotation HOVD-annotations.xlsx \
+  -o hovd_db/ \
+  -j 8
+```
+
+This produces:
+- `hovd_db/BcgI.species.iibdb`
+- `hovd_db/abfh_classify_with_speciename.txt.gz`
+- `hovd_db/metadata.tsv.gz`
+- `hovd_db/BcgI.species.iibdb.stats.txt`
+
+> **Taxonomy note**: HOVD marks many OPD contigs with `uc_*` (unclassified) at species/genus level. `build_hovd_db.py` converts these to `unknown` and uses the HOVD `contig_id` as the `Species` column so that every abundance row remains identifiable and can be annotated with metadata. You can collapse the resulting contig-level profile to family/class/phylum using `annotate_hovd.py` or your own post-processing.
+
+### Profile samples
+
+Prepare a sample list (`samples.tsv`):
+
+```tsv
+sample1  /path/sample1_R1.fq.gz  /path/sample1_R2.fq.gz
+sample2  /path/sample2_R1.fq.gz
+```
+
+Run the 8-enzyme wrapper (replace `hovd_db/` with `vip2b_db/` for VIP2B):
+
+```bash
+python tools/quantify_vip2b.py \
+  -i samples.tsv \
+  -d hovd_db/ \
+  -o hovd_results/ \
+  -j 16 \
+  --qc no \
+  --merge-prefix HOVD
+```
+
+Outputs:
+- `{outdir}/01_extract/` — per-enzyme `.iibsp` files and combined `.VIP2B.iibsp`
+- `{outdir}/02_quantify/{sample}/{sample}.BcgI.xls` — per-sample viral abundance
+- `{outdir}/03_profiles/{sample}.VIP2B.xls` — convenience copy of each profile
+- `{outdir}/{prefix}.all.xls` and `{prefix}.filtered.xls` — merged abundance matrix (if ≥2 samples)
+
+For already-demultiplexed 2bRAD tag reads, use `--input-type 3`. For WGS/shotgun data (default), use `--input-type 2`.
+
+### Annotate with viral metadata
+
+For VIP2B:
+
+```bash
+python tools/annotate_vip2b.py \
+  -i vip2b_results/VIP2B.all.xls \
+  -d vip2b_db/metadata.tsv.gz \
+  -o vip2b_results/annotation/
+```
+
+This writes:
+- `Phenotype.tsv` — lifestyle, jumbo-phage status, viralverify prediction
+- `viral_function/Uniref90.tsv` — normalized UniRef90 gene abundance
+- `viral_function/cluster.tsv` — normalized info-annotation cluster abundance
+- `viral_taxonomy/{kingdom..genus}_abund.tsv` — collapsed viral taxonomy
+- `host_taxonomy/{domain..species}_abund.tsv` — collapsed host taxonomy
+
+For HOVD:
+
+```bash
+python tools/annotate_hovd.py \
+  -i hovd_results/HOVD.all.xls \
+  -d hovd_db/metadata.tsv.gz \
+  -o hovd_results/annotation/
+```
+
+This writes:
+- `metadata_stats.tsv` — checkv quality, provirus status, geography, oral site
+- `viral_taxonomy/{kingdom..species}_abund.tsv` — collapsed oral viral taxonomy
 
 ---
 
@@ -609,10 +922,6 @@ results/
     ├── run1.filtered.xls          # Filtered (mock/control removed)
     ├── run1.func.xls              # Functional abundance (if --ko-mapping used)
     └── .done
-
-├── classify/                      # ML classification results (optional)
-│   ├── sample1.BcgI.classified.xls   # Per-sample with Prediction column
-│   └── sample2.BcgI.classified.xls
 ```
 
 ---

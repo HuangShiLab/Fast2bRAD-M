@@ -16,8 +16,8 @@ use needletail::parse_fastx_file;
 use rayon::prelude::*;
 use tracing;
 
-use crate::enzymes::{Enzyme, enzyme_by_id, enzyme_by_name};
-use crate::io_utils;
+use f2brad_core::enzymes::{Enzyme, enzyme_by_id, enzyme_by_name};
+use f2brad_core::io_utils;
 
 pub type Hash = u64;
 

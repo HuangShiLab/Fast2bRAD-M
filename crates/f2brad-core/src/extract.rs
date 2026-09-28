@@ -45,7 +45,7 @@ pub type Hash = u64;
 /// Compute hash of the canonical (lexicographically smaller of forward/RC) sequence.
 /// Uses a fixed stack buffer — zero heap allocation.
 #[inline]
-fn canonical_hash(seq: &[u8]) -> Hash {
+pub fn canonical_hash(seq: &[u8]) -> Hash {
     debug_assert!(
         seq.len() <= MAX_TAG_LENGTH,
         "tag of {} bases exceeds canonical_hash's {}-byte buffer",

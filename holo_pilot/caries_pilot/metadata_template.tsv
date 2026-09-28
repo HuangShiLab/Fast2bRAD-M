@@ -1,0 +1,3 @@
+sample_id	r1	r2	phenotype
+ECC001	/path/to/ECC001_R1.fq.gz	/path/to/ECC001_R2.fq.gz	ECC
+CTRL001	/path/to/CTRL001_R1.fq.gz	/path/to/CTRL001_R2.fq.gz	Healthy

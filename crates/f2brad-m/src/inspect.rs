@@ -22,8 +22,8 @@ use anyhow::{Context, Result};
 use clap::Args;
 use fxhash::{FxHashMap, FxHashSet};
 
-use crate::enzymes::enzyme_by_name;
-use crate::io_utils;
+use f2brad_core::enzymes::enzyme_by_name;
+use f2brad_core::io_utils;
 
 #[derive(Args, Debug)]
 pub struct InspectArgs {

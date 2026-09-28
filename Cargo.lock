@@ -393,12 +393,60 @@ dependencies = [
 ]
 
 [[package]]
-name = "fast2bRAD-M"
+name = "f2brad-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap 4.6.1",
+ "flate2",
+ "fxhash",
+ "indicatif",
+ "needletail",
+ "rayon",
+ "regex",
+ "tracing",
+ "zstd",
+]
+
+[[package]]
+name = "f2brad-holo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap 4.6.1",
+ "f2brad-core",
+ "f2brad-host",
+ "flate2",
+ "needletail",
+ "rayon",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "f2brad-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap 4.6.1",
+ "f2brad-core",
+ "flate2",
+ "fxhash",
+ "indicatif",
+ "needletail",
+ "rayon",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "f2brad-m"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap 4.6.1",
  "csv",
+ "f2brad-core",
  "flate2",
  "fxhash",
  "indicatif",
@@ -604,6 +652,7 @@ dependencies = [
  "console",
  "number_prefix",
  "portable-atomic",
+ "rayon",
  "unicode-width 0.2.2",
  "web-time",
 ]
