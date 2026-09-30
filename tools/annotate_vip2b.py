@@ -2,13 +2,13 @@
 """
 annotate_vip2b.py
 
-对 quantify_vip2b.py 产生的合并病毒丰度表（如 VIP2B.all.xls）结合
+对 quantify_vip2b.py 产生的 UHGV-8E 合并病毒丰度表（如 UHGV.all.xls）结合
 metadata.tsv.gz 进行病毒注释：生活方式、宿主taxonomy、病毒taxonomy、
 UniRef90 功能基因和 info 聚类。
 
 输入:
   -i  合并丰度表 (fast2bRAD-M merge 输出的 *.all.xls)
-  -d  VIP2B metadata.tsv.gz
+  -d  UHGV-8E/VIP2B metadata.tsv.gz
   -o  输出目录
 
 输出:
@@ -20,9 +20,9 @@ UniRef90 功能基因和 info 聚类。
 
 用法:
   python tools/annotate_vip2b.py \
-    -i vip2b_results/VIP2B.all.xls \
-    -d vip2b_db/metadata.tsv.gz \
-    -o vip2b_results/annotation/
+    -i uhgv_results/UHGV.all.xls \
+    -d uhgv_db/metadata.tsv.gz \
+    -o uhgv_results/annotation/
 """
 import argparse
 import gzip
@@ -80,7 +80,7 @@ def parse_abundance(path: Path) -> Tuple[List[str], List[str], List[Dict[str, ob
                 sample_cols.append(h)
         if "Species" not in taxonomy_cols:
             sys.stderr.write(
-                "ERROR: abundance table must contain Species column (VIP2B vOTU)\n"
+                "ERROR: abundance table must contain Species column (UHGV vOTU)\n"
             )
             sys.exit(1)
         species_idx = taxonomy_cols.index("Species")
@@ -245,10 +245,10 @@ def generate_taxonomy_breakdown(
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Annotate VIP2B/Fast2bRAD-M viral abundance table with metadata"
+        description="Annotate UHGV-8E/Fast2bRAD-M viral abundance table with metadata"
     )
     ap.add_argument("-i", "--input", required=True, help="Merged abundance table (*.all.xls)")
-    ap.add_argument("-d", "--metadata", required=True, help="VIP2B metadata.tsv.gz")
+    ap.add_argument("-d", "--metadata", required=True, help="UHGV-8E/VIP2B metadata.tsv.gz")
     ap.add_argument("-o", "--outdir", required=True, help="Output directory")
     args = ap.parse_args()
 

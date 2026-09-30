@@ -2,8 +2,9 @@
 """
 convert_vip2b_db.py
 
-将 VIP2B 的 marisa 病毒数据库转换为 fast2bRAD-M 可读取的 CompactDatabase v3
-(.iibdb) 及配套的 abfh_classify_with_speciename.txt.gz。
+将 UHGV-8E 源 index（随 VIP2B v1.1 分发）转换为 fast2bRAD-M 可读取的
+CompactDatabase v3 (.iibdb) 及配套的 abfh_classify_with_speciename.txt.gz。
+VIP2B 是软件名；其肠道病毒 reference 是 UHGV。
 
 VIP2B 数据库结构（8Enzyme.Species.uniq.marisa）:
   - key: 酶切 tag，固定 40 字符，前导 '0' 为填充（zfill(40)）
@@ -31,7 +32,7 @@ VIP2B 数据库结构（8Enzyme.Species.uniq.marisa）:
     -s BcgI
 
 注意:
-  VIP2B 是 8 种酶（AlfI/BcgI/BslFI/CjeI/CjePI/FalI/HaeIV/Hin4I）合并的
+  UHGV-8E 是 8 种酶（AlfI/BcgI/BslFI/CjeI/CjePI/FalI/HaeIV/Hin4I）合并的
   数据库。site 参数仅用于命名输出文件并作为 fast2bRAD-M quantify 的占位
   酶名，必须是一个 fast2bRAD-M 已识别的酶（默认 BcgI）。
 """
@@ -229,11 +230,11 @@ def convert_vip2b_db(
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Convert VIP2B marisa viral DB to fast2bRAD-M .iibdb"
+        description="Convert the UHGV-8E/VIP2B marisa viral index to fast2bRAD-M .iibdb"
     )
     ap.add_argument("-m", "--marisa", required=True, help="Input marisa DB file")
     ap.add_argument(
-        "-c", "--classify", required=True, help="VIP2B abfh_classify_with_speciename.txt.gz"
+        "-c", "--classify", required=True, help="UHGV-8E/VIP2B abfh_classify_with_speciename.txt.gz"
     )
     ap.add_argument("-o", "--outdir", required=True, help="Output directory")
     ap.add_argument(

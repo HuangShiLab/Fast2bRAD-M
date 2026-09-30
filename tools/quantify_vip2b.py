@@ -2,14 +2,15 @@
 """
 quantify_vip2b.py
 
-使用 Fast2bRAD-M 的 extract/quantify 子命令，对 VIP2B 风格的 8 酶组合
-病毒数据库进行样品定量。
+使用 Fast2bRAD-M 的 extract/quantify 子命令，对 UHGV-8E / HOVD 风格的
+8 酶组合病毒数据库进行样品定量。UHGV-8E 指 UHGV reference 的
+8-enzyme Fast2bRAD-M index；VIP2B 是生成/分发该 index 的软件名。
 
 流程:
   1. 对每对 (R1,R2) 或 SE reads，分别用 8 种酶做 fast2bRAD-M extract，得到
      8 个 .iibsp 文件。
   2. 将 8 个 .iibsp 合并为一个 combined .iibsp（病毒 tag 集合）。
-  3. 用 fast2bRAD-M quantify + 转换后的 VIP2B 数据库得到每个样品的
+  3. 用 fast2bRAD-M quantify + 转换后的病毒数据库得到每个样品的
      病毒丰度表。
   4. （可选）用 fast2bRAD-M merge 输出跨样品的丰度矩阵。
 
@@ -23,8 +24,8 @@ quantify_vip2b.py
 用法示例:
   python tools/quantify_vip2b.py \
     -i samples.tsv \
-    -d vip2b_db/ \
-    -o vip2b_results/ \
+    -d uhgv_db/ \
+    -o uhgv_results/ \
     -j 16
 """
 import argparse
@@ -178,9 +179,9 @@ def run_merge(
 
 
 def main():
-    ap = argparse.ArgumentParser(description="VIP2B-style 8-enzyme viral profiling with Fast2bRAD-M")
+    ap = argparse.ArgumentParser(description="UHGV-8E/HOVD-style 8-enzyme viral profiling with Fast2bRAD-M")
     ap.add_argument("-i", "--input", required=True, help="Sample list TSV: sample<TAB>R1<TAB>[R2]")
-    ap.add_argument("-d", "--database", required=True, help="VIP2B database directory")
+    ap.add_argument("-d", "--database", required=True, help="UHGV-8E or HOVD database directory")
     ap.add_argument("-o", "--outdir", required=True, help="Output directory")
     ap.add_argument("-l", "--level", default="species", help="Taxonomy level (species/genus/...)")
     ap.add_argument("-s", "--site", default="BcgI", help="Placeholder enzyme/site name used in convert_vip2b_db.py")
@@ -192,7 +193,7 @@ def main():
     ap.add_argument("--qc-scope", default="auto", help="fast2bRAD-M extract QC scope (read/tag/auto)")
     ap.add_argument("-g", "--gscore", type=float, default=0.0, help="G-score threshold for quantify")
     ap.add_argument("--no-merge", action="store_true", help="Skip the final merge step")
-    ap.add_argument("--merge-prefix", default="VIP2B", help="Prefix for merged abundance table")
+    ap.add_argument("--merge-prefix", default="VIP2B", help="Output prefix; use UHGV for new UHGV-8E runs (legacy default retained)")
     args = ap.parse_args()
 
     fast2brad_m = find_fast2brad_m(args.fast2brad_m)

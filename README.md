@@ -30,6 +30,7 @@
   - [f2brad-holo](#f2brad-holo)
     - [classify](#classify)
 - [File Formats](#file-formats)
+- [Viral Profiling](#viral-profiling)
 - [Supported Enzymes](#supported-enzymes)
 - [Output Directory Structure](#output-directory-structure)
 - [License](#license)
@@ -45,7 +46,7 @@
 - **Functional Prediction** — Matrix-multiplication-based functional abundance profiling (KO, KEGG, etc.)
 - **Host Genotyping** — `f2brad-host` builds a host tag database and calls genotypes from 2bRAD reads
 - **Holo-2bRAD Integration** — `f2brad-holo` performs one-pass joint host genotyping + microbial profiling with microbial cross-assignment masking
-- **Viral Profiling (VIP2B)** — Convert the VIP2B UHGV viral database and profile viruses with the same 8-enzyme strategy
+- **Viral Profiling (UHGV-8E and HOVD)** — Profile gut and oral viruses using eight-enzyme reference databases; see [docs/DATABASES.md](docs/DATABASES.md)
 - **Database Inspection** — `inspect` reports format, tag counts and example records from binary `.iibdb`/`.iibsp` files
 - **Resume Support** — `.done` marker files allow interrupted runs to be resumed without re-computation
 - **One-Command Pipeline** — The `pipeline` subcommand chains all steps automatically
@@ -691,16 +692,20 @@ f2brad-holo classify \
 
 Fast2bRAD-M ships with helper scripts that reuse 8-enzyme viral databases inside the existing `fast2bRAD-M quantify` framework. Two databases are currently supported:
 
-- **[VIP2B](https://github.com/sunzhengCDNM/VIP2B)** — gut/phage database based on UHGV
+- **[UHGV-8E](docs/DATABASES.md)** — human gut/phage database based on UHGV; distributed through the VIP2B v1.1 source package
 - **[HOVD](https://hovd.org)** — Human Oral Virome Database (OPD + OED)
 
 Both use the same 8-enzyme strategy (AlfI, BcgI, BslFI, CjeI, CjePI, FalI, HaeIV, Hin4I) and the same `quantify_vip2b.py` wrapper.
 
-### VIP2B database
+> **Naming note**: VIP2B is profiling software, not the database name. VIP2B uses
+> **UHGV** (Unified Human Gut Virome). Fast2bRAD-M's converted, eight-enzyme
+> species index is therefore called **UHGV-8E**.
 
-#### 1. Obtain the VIP2B database
+### UHGV-8E database
 
-Download the three files below from the VIP2B Zenodo record (e.g. `https://zenodo.org/records/18944630`):
+#### 1. Obtain the UHGV/VIP2B source files
+
+Download the three files below from the VIP2B v1.1 Zenodo record (e.g. `https://zenodo.org/records/18944630`):
 
 - `8Enzyme.Species.uniq.marisa`
 - `abfh_classify_with_speciename.txt.gz`
@@ -712,17 +717,17 @@ Download the three files below from the VIP2B Zenodo record (e.g. `https://zenod
 python tools/convert_vip2b_db.py \
   -m 8Enzyme.Species.uniq.marisa \
   -c abfh_classify_with_speciename.txt.gz \
-  -o vip2b_db/ \
+  -o uhgv_db/ \
   -l species \
   -s BcgI
 ```
 
 This produces:
-- `vip2b_db/BcgI.species.iibdb` (placeholder enzyme name for the combined 8-enzyme DB)
-- `vip2b_db/abfh_classify_with_speciename.txt.gz`
-- `vip2b_db/BcgI.species.iibdb.stats.txt`
+- `uhgv_db/BcgI.species.iibdb` (placeholder enzyme name for the combined 8-enzyme DB)
+- `uhgv_db/abfh_classify_with_speciename.txt.gz`
+- `uhgv_db/BcgI.species.iibdb.stats.txt`
 
-> **Note on the `-s` placeholder**: VIP2B's `8Enzyme.Species.uniq` database already contains tags from all eight enzymes. `fast2bRAD-M quantify` requires a valid enzyme name purely for output naming, so `convert_vip2b_db.py` defaults to `BcgI`. The actual quantification below extracts tags with all eight enzymes and merges them before profiling.
+> **Note on the `-s` placeholder**: the UHGV-8E source index already contains tags from all eight enzymes. `fast2bRAD-M quantify` requires a valid enzyme name purely for output naming, so `convert_vip2b_db.py` defaults to `BcgI`. The actual quantification below extracts tags with all eight enzymes and merges them before profiling.
 
 ### HOVD database
 
@@ -760,7 +765,8 @@ sample1  /path/sample1_R1.fq.gz  /path/sample1_R2.fq.gz
 sample2  /path/sample2_R1.fq.gz
 ```
 
-Run the 8-enzyme wrapper (replace `hovd_db/` with `vip2b_db/` for VIP2B):
+Run the 8-enzyme wrapper (replace `hovd_db/` with `uhgv_db/` and use
+`--merge-prefix UHGV` for UHGV-8E):
 
 ```bash
 python tools/quantify_vip2b.py \
@@ -782,13 +788,13 @@ For already-demultiplexed 2bRAD tag reads, use `--input-type 3`. For WGS/shotgun
 
 ### Annotate with viral metadata
 
-For VIP2B:
+For UHGV-8E:
 
 ```bash
 python tools/annotate_vip2b.py \
-  -i vip2b_results/VIP2B.all.xls \
-  -d vip2b_db/metadata.tsv.gz \
-  -o vip2b_results/annotation/
+  -i uhgv_results/UHGV.all.xls \
+  -d uhgv_db/metadata.tsv.gz \
+  -o uhgv_results/annotation/
 ```
 
 This writes:
